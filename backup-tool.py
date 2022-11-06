@@ -153,7 +153,7 @@ class Backup:
         self.owner = owner
         self.format = output_format
         self.cmd = None
-        self.dest_dir = self.create_dir(os.path.join(self.parent_dir, f'backup-{get_today()}'))
+        self.dest_dir = self.set_dest_dir()
 
     def get_num(self):
         try:
@@ -192,26 +192,28 @@ class Backup:
         os.system(f'chown -R {self.owner}:{self.owner} {self.dest_dir}')
         os.system(f'chmod 440 {self.dest_dir}')
 
+    def set_dest_dir(self):
+        path = os.path.join(self.parent_dir, f'backup-{get_today()}')
+        if not os.path.exists(path):
+            os.makedirs(path)
+        return path
+
     def set_cmd(self):
         logging.debug(f'cmd: {self.cmd if self.password is None else self.cmd.replace(self.password, "****")}')
 
     def create(self):
         os.system(self.cmd)
-        self.set_privileges()
         if self.format == TAR_FORMAT:
+            logging.info(f'archiving backup "{self.dest_dir}"...')
             os.chdir(self.parent_dir)
             backup_file = os.path.basename(os.path.normpath(self.dest_dir))
             os.system(f'tar -czf {backup_file}.tar.gz {backup_file} && rm -rf {backup_file}')
             logging.info(f'backup "{self.dest_dir}" archived to package')
+            self.dest_dir = f'{self.dest_dir}.tar.gz'
         elif self.format == PLAIN_FORMAT:
             pass
+        self.set_privileges()
         logging.info(f'COMPLETE: backup "{self}"')
-
-    @staticmethod
-    def create_dir(path):
-        if not os.path.exists(path):
-            os.makedirs(path)
-        return path
 
     def __repr__(self):
         return self.dest_dir
