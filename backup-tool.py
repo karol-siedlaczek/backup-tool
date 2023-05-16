@@ -24,7 +24,7 @@ PLAIN_FORMAT = 'plain'
 
 DEFAULTS = {
     'HOST_ADDRESS': ipaddress.IPv4Address('127.0.0.1'),
-    'LOG_FILE': os.path.abspath(os.path.join(os.sep, 'var', 'log', f'{os.path.basename(__file__).split(".")[0]}.log')),
+    'LOG_FILE': os.path.abspath(os.path.join('log', f'{os.path.basename(__file__).split(".")[0]}.log')),
     'OWNER': 'root',
     'MAX': 10,  # max number of backups, if max number will be exceeded the oldest file backup be deleted
     'HOSTS_FILE': os.path.abspath(os.path.join(os.sep, 'etc', 'hosts')),
@@ -342,53 +342,59 @@ def is_localhost():  # check if arg is defined to use in localhost
     return False
 
 
+def is_database_action(action):
+    return 'mysql' == action or 'psql' == action
+
+
+def is_file_action(action):
+    return 'daemon' == action or 'ssh' == action or 'local' == action
+
+
+def is_git_action(action):
+    return 'git' == action
+
+'''
+import argparse
+
+parser = argparse.ArgumentParser(description='test group')
+subparsers = parser.add_subparsers(help='sub-commands help')
+sp = subparsers.add_parser('A', help='A command')
+sp.set_defaults(cmd = 'A')
+sp = subparsers.add_parser('B', help='B command')
+sp.set_defaults(cmd = 'B')
+sp.add_argument('C', help='C option')
+
+args = parser.parse_args()
+
+if (args.cmd == 'A'):
+    print("running A mode")
+else:
+    print("running B mode with C=%s" % args.C)
+'''
+
 def parse_args():
+    action_parser = argparse.ArgumentParser(description='Script to make backups')
+    #action_parser.add_argument('action',
+    #                    choices=DEFAULTS['FILE_BACKUP_CHOICES'] + DEFAULTS['DATABASE_BACKUP_CHOICES'],
+    #                    help='Type of rsync connection to create file backups')
+    #args = action_parser.parse_args()
     parser = argparse.ArgumentParser(description='Script to make backups')
-    parser.add_argument('--type',
-                        choices=DEFAULTS['FILE_BACKUP_CHOICES'] + DEFAULTS['DATABASE_BACKUP_CHOICES'],
-                        help='Type of rsync connection to create file backups',
-                        required=True)
-    parser.add_argument('-D', '--databases',
-                        nargs='+',
-                        help='Specifies the name of the databases to dump',
-                        type=str,
-                        metavar='database1',
-                        required=is_database_backup())
-    parser.add_argument('-P', '--dbPort',
-                        help='Database port, only usable when --database backup',
-                        type=int,
-                        metavar='port',
-                        required=is_database_backup())
-    parser.add_argument('-s', '--sourceDirs',
-                        nargs='+',
-                        metavar='path1',
-                        help='All directories which will be part of backup, all data from these directories '
-                             'will be recursively copied to directory from -d/--destDir',
-                        required=is_file_backup())
+    parser.add_argument('action',
+                        choices=DEFAULTS['FILE_BACKUP_CHOICES'] + DEFAULTS['DATABASE_BACKUP_CHOICES'] + ['file', 'database'],
+                        help='Type of rsync connection to create file backups')
     parser.add_argument('-d', '--destDir',
                         help='Destination directory where backup will be stored, backup will be created '
                              'as sub directory of directory specified here in format <dest_dir>/backup-<curr_date> '
                              'in file backup or <dest_dir>/<database>/<backup>-<curr_date> if database backup',
                         type=os.path.abspath,
-                        metavar='directory',
-                        required=True)
-    parser.add_argument('-H', '--hostAddress',
-                        help=f'This option allows to specify IP address to bind to, default is {DEFAULTS["HOST_ADDRESS"]}',
-                        type=ipaddress.IPv4Address,
-                        metavar='ip_address',
-                        default=DEFAULTS['HOST_ADDRESS'])
-    parser.add_argument('-u', '--user',
-                        help='User name to connect as to make database dump or establish connection by rsync',
-                        type=str,
-                        metavar='username',
-                        required=is_database_backup() or (not is_localhost() and is_file_backup()))
-    parser.add_argument('-p', '--password',
-                        help='This option is not essential, if --nopasswd is not defined script will be prompt for password',
-                        type=str,
-                        metavar='password_plain')
-    parser.add_argument('-n', '--nopasswd',
-                        help='Force to not use password and not prompt for password, script will try to lookup to default files with passwords (depends on --type choose)',
-                        action='store_true')
+                        metavar='directory')
+
+    '''parser.add_argument('-d', '--destDir',
+                        help='Destination directory where backup will be stored, backup will be created '
+                             'as sub directory of directory specified here in format <dest_dir>/backup-<curr_date> '
+                             'in file backup or <dest_dir>/<database>/<backup>-<curr_date> if database backup',
+                        type=os.path.abspath,
+                        metavar='directory')
     parser.add_argument('-f', '--format',
                         help=f'Selects the format of the output backup, default is {PLAIN_FORMAT}',
                         choices=DEFAULTS['FORMAT_CHOICES'],
@@ -396,42 +402,112 @@ def parse_args():
     parser.add_argument('-o', '--owner',
                         help=f'User which will be owner of the output backup, default is {DEFAULTS["OWNER"]}',
                         type=str,
-                        metavar='username',
+                        metavar='user',
                         default=DEFAULTS['OWNER'])
-    parser.add_argument('-e', '--exclude',
-                        help='Exclude files or directory matching pattern/s',
-                        type=str,
-                        nargs='+',
-                        metavar='pattern')
-    parser.add_argument('--tryStartHost',
-                        help='Choose this option if you want send WOL packet to host if ping is not successful',
-                        action='store_true')
     parser.add_argument('-m', '--max',
                         help=f'Number of max backup directories, if there will be more than specified number the oldest backup will be deleted, default is {DEFAULTS["MAX"]}',
                         type=int,
                         metavar='number',
-                        default=DEFAULTS['MAX'])
-    parser.add_argument('--daemonPasswdFile',
-                        help=f'File with password for rsync user to establish connection in rsync by daemon, default is {DEFAULTS["PASSWD_FILE"]["DAEMON"]}',
-                        type=str,
-                        metavar='file',
-                        default=DEFAULTS['PASSWD_FILE']['DAEMON'])
-    parser.add_argument('--sshPasswdFile',
-                        help=f'File with password for rsync user to establish connection in rsync via ssh, default is {DEFAULTS["PASSWD_FILE"]["SSH"]}',
-                        type=str,
-                        metavar='file',
-                        default=DEFAULTS['PASSWD_FILE']['SSH'])
-    parser.add_argument('--hostsFile',
-                        help=f'File with hosts, default is {DEFAULTS["HOSTS_FILE"]}',
-                        type=str,
-                        metavar='file',
-                        default=DEFAULTS['HOSTS_FILE'])
-    return parser.parse_args()
+                        default=DEFAULTS['MAX'])'''
+    '''
+    if is_database_action(args.action):
+        db_parser = argparse.ArgumentParser(add_help=False)
+        db_parser.add_argument('-D', '--databases',
+                            nargs='+',
+                            help='Specifies the name of the databases to dump',
+                            type=str,
+                            metavar='database1',
+                            required=is_database_backup())
+        db_parser.add_argument('-P', '--dbPort',
+                            help='Database port, only usable when --database backup',
+                            type=int,
+                            metavar='port',
+                            required=is_database_backup())
+    elif is_file_action(args.action):
+        print('file')
+        file_parser = argparse.ArgumentParser(add_help=False)
+        file_parser.add_argument('-s', '--sourceDirs',
+                            nargs='+',
+                            metavar='path1',
+                            help='All directories which will be part of backup, all data from these directories '
+                                 'will be recursively copied to directory from -d/--destDir',
+                            required=is_file_backup())
+        file_parser.add_argument('-e', '--exclude',
+                            help='Exclude files or directory matching pattern/s',
+                            type=str,
+                            nargs='+',
+                            metavar='pattern')
+        file_parser.add_argument('--daemonPasswdFile',
+                            help=f'File with password for rsync user to establish connection in rsync by daemon, default is {DEFAULTS["PASSWD_FILE"]["DAEMON"]}',
+                            type=str,
+                            metavar='file',
+                            default=DEFAULTS['PASSWD_FILE']['DAEMON'])
+        file_parser.add_argument('--sshPasswdFile',
+                            help=f'File with password for rsync user to establish connection in rsync via ssh, default is {DEFAULTS["PASSWD_FILE"]["SSH"]}',
+                            type=str,
+                            metavar='file',
+                            default=DEFAULTS['PASSWD_FILE']['SSH'])
+    if is_file_action(args.action) or is_database_action(args.action):
+        file_db_parser = argparse.ArgumentParser(add_help=False)
+        file_db_parser.add_argument('-H', '--hostAddress',
+                            help=f'This option allows to specify IP address to bind to, default is {DEFAULTS["HOST_ADDRESS"]}',
+                            type=ipaddress.IPv4Address,
+                            metavar='ip_address',
+                            default=DEFAULTS['HOST_ADDRESS'])
+        file_db_parser.add_argument('-u', '--user',
+                            help='User name to connect as to make database dump or establish connection by rsync',
+                            type=str,
+                            metavar='username',
+                            required=is_database_backup() or (not is_localhost() and is_file_backup()))
+        file_db_parser.add_argument('-p', '--password',
+                            help='This option is not essential, if --nopasswd is not defined script will be prompt for password',
+                            type=str,
+                            metavar='password_plain')
+        file_db_parser.add_argument('--tryStartHost',
+                            help='Choose this option if you want send WOL packet to host if ping is not successful',
+                            action='store_true')
+        file_db_parser.add_argument('--hostsFile',
+                            help=f'File with hosts, default is {DEFAULTS["HOSTS_FILE"]}',
+                            type=str,
+                            metavar='file',
+                            default=DEFAULTS['HOSTS_FILE'])
+    if is_git_action(args.action):
+        git_parser = argparse.ArgumentParser(add_help=False)
+        git_parser.add_argument('-t', '--token',
+                            type=str,
+                            help='Fine-grainted access token generated in GitHub account settings')
+        git_parser.add_argument('--tokenFile',
+                            help=f'File with Fine-grainted access token to GitHub API',
+                            type=str,
+                            metavar='file')
+
+    args2 = main_parser.parse_args()
+    print(args2)
+
+    #
+    #action_subparser.add_parser('file', parents=[file_parser])
+    #action_subparser.add_parser('database', parents=[db_parser])
+    #action_subparser.add_parser('git', parents=[git_parser])
+    #if args.action == 'file':
+    '''
+    #return parser.parse_args()
+
+def parse_args2():
+    parser = argparse.ArgumentParser(prog='PROG', add_help=True)
+    print(sys.argv[1])
+    parser.add_argument('action', choices=['file', 'database'])
+    action_arg = parser.parse_known_args()
+    print(action_arg)
+    group1 = parser.add_argument_group('group1', 'group1 description')
+    group1.add_argument('--groupOne')
+    group2 = parser.add_argument_group('group2', 'group1 description')
+    group2.add_argument('--groupTwo')
+    parser.parse_args()
 
 
 if __name__ == "__main__":
-    args = parse_args()
-    if args.password is None and not args.nopasswd and args.user:
+    args = parse_args2()
+    '''if args.password is None and not args.nopasswd and args.user:
         args.password = getpass(prompt=f'Enter password for {args.user} user: ')
     elif args.type in DEFAULTS['FILE_BACKUP_CHOICES'] and args.type != LOCAL_BACKUP and args.hostAddress is DEFAULTS['HOST_ADDRESS']:  # if backup is not local, bot host address points to localhost
         raise ValueError(f'selected value "{args.type}" in --type arg requires -h/--hostAddress different than default {DEFAULTS["HOST_ADDRESS"]}')
@@ -458,3 +534,5 @@ if __name__ == "__main__":
     except (ValueError, ConnectionError, OSError) as e:
         logging.error(f'{os.path.basename(__file__)}: {e}')
         print(f'{os.path.basename(__file__)}: {e}')
+        
+    '''
