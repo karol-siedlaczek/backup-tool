@@ -9,33 +9,40 @@ import time
 import shutil
 import logging
 import argparse
-from getpass import getpass
+import git
+import github
 import ipaddress
 from datetime import datetime
 from dateutil.relativedelta import relativedelta
 
-DAEMON_BACKUP = 'daemon'
-SSH_BACKUP = 'ssh'
+FILE_BACKUP = 'file'
+DATABASE_BACKUP = 'database'
+GIT_BACKUP = 'git'
 LOCAL_BACKUP = 'local'
+REMOTE_BACKUP = 'remote'
 PSQL_BACKUP = 'psql'
 MYSQL_BACKUP = 'mysql'
+GITHUB_BACKUP = 'github'
 TAR_FORMAT = 'tar'
 PLAIN_FORMAT = 'plain'
 
 DEFAULTS = {
     'HOST_ADDRESS': ipaddress.IPv4Address('127.0.0.1'),
-    'LOG_FILE': os.path.abspath(os.path.join('log', f'{os.path.basename(__file__).split(".")[0]}.log')),
+    'LOG_FILE': os.path.abspath(os.path.join('/var', 'log', f'{os.path.basename(__file__).split(".")[0]}.log')),
     'OWNER': 'root',
     'MAX': 10,  # max number of backups, if max number will be exceeded the oldest file backup be deleted
     'HOSTS_FILE': os.path.abspath(os.path.join(os.sep, 'etc', 'hosts')),
     'FORMAT_CHOICES': [PLAIN_FORMAT, TAR_FORMAT],
-    'FILE_BACKUP_CHOICES': [DAEMON_BACKUP, SSH_BACKUP, LOCAL_BACKUP],
-    'DATABASE_BACKUP_CHOICES': [PSQL_BACKUP, MYSQL_BACKUP],
+    'BACKUP_TYPE_CHOICES': {
+        FILE_BACKUP: [LOCAL_BACKUP, REMOTE_BACKUP],
+        DATABASE_BACKUP: [PSQL_BACKUP, MYSQL_BACKUP],
+        GIT_BACKUP: [GITHUB_BACKUP]
+    },
     'PASSWD_FILE': {
-        'DAEMON': os.path.join(os.path.expanduser("~"), '.rsyncpass'),
-        'SSH': os.path.join(os.path.expanduser("~"), '.ssh', '.password'),
+        'RSYNC': os.path.join(os.path.expanduser("~"), '.rsyncpass'),
         'PSQL': os.path.join(os.path.expanduser("~"), '.pgpass'),
-        'MYSQL': os.path.join(os.path.expanduser("~"), '.my.cnf',)
+        'MYSQL': os.path.join(os.path.expanduser("~"), '.my.cnf',),
+        'GITHUB': os.path.join(os.path.expanduser("~"), '.github-token',)
     },
 }
 
@@ -142,17 +149,12 @@ class Host:
 
 
 class Backup:
-    def __init__(self, backup_type, host, user, password, no_password, parent_dir, max_num, owner, output_format):
+    def __init__(self, backup_type, parent_dir, max_num, owner, output_format):
         self.type = backup_type
-        self.password = password
-        self.host = host
-        self.user = user
-        self.no_password = no_password
         self.parent_dir = parent_dir
         self.max = max_num
         self.owner = owner
         self.format = output_format
-        self.cmd = None
         self.dest_dir = self.set_dest_dir()
 
     def get_num(self):
@@ -166,24 +168,25 @@ class Backup:
         except FileNotFoundError:
             return 0  # no parent directory for backups means no backup
 
-    def remove_oldest(self):
+    def get_oldest_backup(self):
         os.chdir(self.parent_dir)
         files = sorted(os.listdir(os.getcwd()), key=os.path.getmtime)  # files[0] is the oldest file, files[-1] is the newest
-        oldest_backup = None
-        for file in files:
-            if os.path.isdir(file):  # looking for first dir in array, so it will find the oldest dir
-                oldest_backup = file
-                break
+        for entry in files:
+            if os.path.isdir(entry):  # looking for first dir in array, so it will find the oldest dir
+                logging.info(f'max ({self.max}) num of backups exceeded, oldest backup "{entry}" will be deleted')
+                return entry
+
+    def remove_backup(self, backup_path):
         try:
             regex_pattern = r'^backup-[0-9]{4}-[0-9]{2}-[0-9]{2}$|^backup-[0-9]{4}-[0-9]{2}-[0-9]{2}\.tar\.gz$'  # to avoid deleting unexpected directory when user provide wrong path
-            logging.info(f'max ({self.max}) num of backups exceeded, deleting oldest backup "{oldest_backup}" in progress...')
-            if re.match(regex_pattern, oldest_backup):
-                shutil.rmtree(oldest_backup)
-                logging.debug(f'oldest backup "{oldest_backup}" has been deleted')
+            logging.info(f'deleting backup "{backup_path}" in progress...')
+            if re.match(regex_pattern, backup_path):
+                shutil.rmtree(backup_path)
+                logging.debug(f'oldest backup "{backup_path}" has been deleted')
             else:
-                logging.warning(f'backup not deleted, name of "{oldest_backup}" does not fit to backup pattern filename')
+                logging.warning(f'backup not deleted, name of "{backup_path}" does not fit to backup pattern filename')
         except PermissionError as e:
-            logging.error(f'{os.path.basename(__file__)}: {e}, cannot delete oldest backup "{oldest_backup}"')
+            logging.error(f'{os.path.basename(__file__)}: {e}, cannot delete backup "{backup_path}"')
             print(f'{os.path.basename(__file__)}: an error has occurred, check {DEFAULTS["LOG_FILE"]} for more information')
 
     def set_privileges(self):
@@ -198,11 +201,7 @@ class Backup:
             os.makedirs(path)
         return path
 
-    def set_cmd(self):
-        logging.debug(f'cmd: {self.cmd if self.password is None else self.cmd.replace(self.password, "****")}')
-
     def create(self):
-        os.system(self.cmd)
         if self.format == TAR_FORMAT:
             logging.info(f'archiving backup "{self.dest_dir}"...')
             os.chdir(self.parent_dir)
@@ -212,17 +211,49 @@ class Backup:
             self.dest_dir = f'{self.dest_dir}.tar.gz'
         elif self.format == PLAIN_FORMAT:
             pass
-        self.set_privileges()
-        logging.info(f'COMPLETE: backup "{self}"')
+        if Backup.get_dir_size(self.dest_dir) > 800:  # bytes
+            logging.info(f'COMPLETE: backup success "{self}"')
+        else:
+            logging.error(f'ERROR: backup "{self}" failed, size is less than 500 B, deleting directory with backup...')
+            backup.remove_backup(self.dest_dir)
+            logging.info(f'failed backup "{self}" deleted')
+            print(f'ERROR: backup "{self}" failed, size is less than 500 B, backup directory has been deleted')
+
+    @staticmethod
+    def get_dir_size(path):
+        total_size = 0
+        with os.scandir(path) as directory:
+            for entry in directory:
+                if entry.is_file():
+                    total_size += entry.stat().st_size
+                elif entry.is_dir():
+                    total_size += Backup.get_dir_size(entry.path)
+        return total_size
 
     def __repr__(self):
         return self.dest_dir
 
 
-class FileBackup(Backup):
-    def __init__(self, backup_type, host_address, user, password, no_password, dest_dir, max_num, owner, output_format, daemon_password_file, ssh_password_file, source_dirs, excluded_dirs):
-        super().__init__(backup_type, host_address, user, password, no_password, dest_dir, max_num, owner, output_format)
-        self.password_file = (daemon_password_file, ssh_password_file)
+class FileDatabaseBackup(Backup):
+    def __init__(self, backup_type, host, user, password, dest_dir, max_num, owner, output_format):
+        super().__init__(backup_type, dest_dir, max_num, owner, output_format)
+        self.host = host
+        self.user = user
+        self.password = password
+        self.cmd = None
+
+    def set_cmd(self):
+        logging.debug(f'cmd: {self.cmd if self.password is None else self.cmd.replace(self.password, "****")}')
+
+    def create(self):
+        os.system(self.cmd)
+        super().create()
+
+
+class FileBackup(FileDatabaseBackup):
+    def __init__(self, backup_type, host, user, password, dest_dir, max_num, owner, output_format, rsync_password_file, source_dirs, excluded_dirs):
+        super().__init__(backup_type, host, user, password, dest_dir, max_num, owner, output_format)
+        self.password_file = rsync_password_file
         self.source_dirs = source_dirs
         self.excluded_dirs = excluded_dirs
 
@@ -231,14 +262,12 @@ class FileBackup(Backup):
         return self._password_file
 
     @password_file.setter
-    def password_file(self, password_files):
-        if self.type == DAEMON_BACKUP:
-            password_file = password_files[0]
-        elif self.type == SSH_BACKUP:
-            password_file = password_files[1]
+    def password_file(self, rsync_password_file):
+        if self.type == REMOTE_BACKUP:
+            password_file = rsync_password_file
         else:  # LOCAL_BACKUP type
             password_file = None
-        if password_file and self.no_password and not os.path.isfile(password_file):
+        if password_file and not self.password and not os.path.isfile(password_file):
             raise OSError(f'Password file "{password_file}" does not exist, use -p/--password to input password as arg or create this file')
         self._password_file = password_file
 
@@ -251,16 +280,9 @@ class FileBackup(Backup):
         if self.type == LOCAL_BACKUP:
             source_dirs = ' '.join(directory for directory in self.source_dirs)
             self.cmd = f'{base_cmd} {source_dirs} {self.dest_dir} {log_file}'
-        elif self.type == SSH_BACKUP:  # -l to copy links, -v verbosity in log, -t timestamps in log, -a archive mode is equivalent to  -rlptgoD, so recurse mode is on etc.
-            source_dirs = ' '.join(f'{self.host.ip_address}:{directory}' for directory in self.source_dirs)
-            if self.no_password:
-                password_arg = f'-f {self.password_file}'
-            else:
-                password_arg = f'-p {self.password}'
-            self.cmd = f'{base_cmd} --rsh="sshpass -P assphrase {password_arg} ssh -l {self.user}" {source_dirs} {self.dest_dir} {log_file}'
-        elif self.type == DAEMON_BACKUP:
+        elif self.type == REMOTE_BACKUP:
             source_dirs = ' '.join(f'rsync://{self.user}@{self.host.ip_address}{directory}' for directory in self.source_dirs)
-            if self.no_password:
+            if not self.password:
                 base_cmd = f'{base_cmd} --password-file="{self.password_file}"'
             else:
                 base_cmd = f'RSYNC_PASSWORD={self.password} {base_cmd}'
@@ -273,10 +295,10 @@ class FileBackup(Backup):
         super().create()
 
 
-class DatabaseBackup(Backup):
-    def __init__(self, backup_type, host_address, user, password, no_password, dest_dir, max_num, owner, output_format, database, port):
-        super().__init__(backup_type, host_address, user, password, no_password, dest_dir, max_num, owner, output_format)
-        self.password_file = (DEFAULTS['PASSWD_FILE']['PSQL'], DEFAULTS['PASSWD_FILE']['MYSQL'])
+class DatabaseBackup(FileDatabaseBackup):
+    def __init__(self, backup_type, host, user, password, password_file, dest_dir, max_num, owner, output_format, database, port):
+        super().__init__(backup_type, host, user, password, dest_dir, max_num, owner, output_format)
+        self.password_file = password_file
         self.database = database
         self.port = port
 
@@ -285,26 +307,21 @@ class DatabaseBackup(Backup):
         return self
 
     @password_file.setter
-    def password_file(self, password_files):
-        password_file = None
-        if self.type == PSQL_BACKUP:
-            password_file = password_files[0]
-        elif self.type == MYSQL_BACKUP:
-            password_file = password_files[1]
-        if password_file and self.no_password and not os.path.isfile(password_file):
-            raise OSError(f'Password file "{password_file}" does not exist, use -p/--password to input password as arg or create this file, see details how to create this file in {self.type} docs')
-        self._password_file = password_file
+    def password_file(self, file_with_password):
+        if file_with_password and not self.password and not os.path.isfile(file_with_password):
+            raise OSError(f'Password file "{file_with_password}" does not exist, use -p/--password to input password as arg or create this file, see details how to create this file in {self.type} docs')
+        self._password_file = file_with_password
 
     def set_cmd(self):
         log_file = os.path.join(self.dest_dir, "dump.log")
         sql_file = os.path.join(self.dest_dir, f"{self.database}.sql")
         if self.type == PSQL_BACKUP:  # -F t to .tar format
             self.cmd = f'pg_dump -h {self.host.ip_address} -p {self.port} -U {self.user} -v {self.database} > {sql_file} 2> {log_file}'
-            if not self.no_password:
+            if self.password:
                 self.cmd = f'PGPASSWORD={self.password} {self.cmd}'
         elif self.type == MYSQL_BACKUP:
             self.cmd = f'mysqldump -h {self.host.ip_address} -P {self.port} -u {self.user} -v'
-            if not self.no_password:
+            if self.password:
                 self.cmd = f'{self.cmd} --password={self.password}'
             self.cmd = f'{self.cmd} {self.database} > {sql_file} 2> {log_file}'
         super().set_cmd()
@@ -315,224 +332,146 @@ class DatabaseBackup(Backup):
         super().create()
 
 
+class GitBackup(Backup):
+    def __init__(self, backup_type, dest_dir, max_num, owner, output_format, token, token_file, repositories):
+        super().__init__(backup_type, dest_dir, max_num, owner, output_format)
+        git_token = self.get_token(token, token_file)
+        self.git = github.Github(git_token)
+        self.repositories = repositories if repositories else []
+
+    def create(self):
+        user = self.git.get_user()
+        logging.info(f'START: backup "{self}" in progress, GitHub repositories from "{user.raw_data["login"]}" account, repo list: "{user.raw_data["repos_url"]}"')
+        self.set_dest_dir()
+        for repo in user.get_repos():
+            if repo.name in self.repositories or not self.repositories:
+                logging.info(f'cloning "{repo.name}" to "{self.dest_dir}/{repo.name}"...')
+                git.Repo.clone_from(repo.clone_url, f'{self.dest_dir}/{repo.name}')
+        super().create()
+
+    def get_token(self, token, token_file):
+        if token:
+            return token
+        elif token_file:
+            if not os.path.isfile(token_file):
+                raise OSError(f'Token file "{token_file}" does not exist, use -t/--token to input token as arg or create this file')
+            with open(token_file, 'r') as f:
+                return f.read().replace('\n', '')
+
+
 def get_today():
     return (datetime.now()).strftime('%Y-%m-%d')
 
 
-def is_database_backup():
-    for index, arg in enumerate(sys.argv):
-        if arg in DEFAULTS['DATABASE_BACKUP_CHOICES'] and sys.argv[index - 1] == '--type':
-            return True
-    return False
+def is_type_local():
+    try:
+        return sys.argv[2] == LOCAL_BACKUP
+    except IndexError:
+        return False
 
 
-def is_file_backup():
-    for index, arg in enumerate(sys.argv):
-        if arg in DEFAULTS['FILE_BACKUP_CHOICES'] and sys.argv[index - 1] == '--type':
-            return True
-    return False
+def is_type_daemon():
+    try:
+        return sys.argv[2] == REMOTE_BACKUP
+    except IndexError:
+        return False
 
 
-def is_localhost():  # check if arg is defined to use in localhost
-    for index, arg in enumerate(sys.argv):
-        if arg == str(DEFAULTS['HOST_ADDRESS']) and (sys.argv[index - 1] == '--hostAddress' or sys.argv[index - 1] == '-H'):
-            return True
-    if '--hostAddress' not in sys.argv and '-H' not in sys.argv:
-        return True
-    return False
+def is_all_repositories():
+    return '--all' in sys.argv or '-a' in sys.argv
 
 
-def is_database_action(action):
-    return 'mysql' == action or 'psql' == action
-
-
-def is_file_action(action):
-    return 'daemon' == action or 'ssh' == action or 'local' == action
-
-
-def is_git_action(action):
-    return 'git' == action
-
-'''
-import argparse
-
-parser = argparse.ArgumentParser(description='test group')
-subparsers = parser.add_subparsers(help='sub-commands help')
-sp = subparsers.add_parser('A', help='A command')
-sp.set_defaults(cmd = 'A')
-sp = subparsers.add_parser('B', help='B command')
-sp.set_defaults(cmd = 'B')
-sp.add_argument('C', help='C option')
-
-args = parser.parse_args()
-
-if (args.cmd == 'A'):
-    print("running A mode")
-else:
-    print("running B mode with C=%s" % args.C)
-'''
+def set_default_password_file():
+    try:
+        if sys.argv[2] == MYSQL_BACKUP:
+            return DEFAULTS['PASSWD_FILE']['MYSQL']
+        elif sys.argv[2] == PSQL_BACKUP:
+            return DEFAULTS['PASSWD_FILE']['PSQL']
+        elif sys.argv[1] == 'file':
+            return DEFAULTS["PASSWD_FILE"]["RSYNC"]
+        else:
+            return f"'{DEFAULTS['PASSWD_FILE']['MYSQL']}' if '{MYSQL_BACKUP}' type or '{DEFAULTS['PASSWD_FILE']['PSQL']}' if '{PSQL_BACKUP}' type"
+    except IndexError:
+        return False
 
 def parse_args():
-    action_parser = argparse.ArgumentParser(description='Script to make backups')
-    #action_parser.add_argument('action',
-    #                    choices=DEFAULTS['FILE_BACKUP_CHOICES'] + DEFAULTS['DATABASE_BACKUP_CHOICES'],
-    #                    help='Type of rsync connection to create file backups')
-    #args = action_parser.parse_args()
-    parser = argparse.ArgumentParser(description='Script to make backups')
-    parser.add_argument('action',
-                        choices=DEFAULTS['FILE_BACKUP_CHOICES'] + DEFAULTS['DATABASE_BACKUP_CHOICES'] + ['file', 'database'],
-                        help='Type of rsync connection to create file backups')
-    parser.add_argument('-d', '--destDir',
-                        help='Destination directory where backup will be stored, backup will be created '
-                             'as sub directory of directory specified here in format <dest_dir>/backup-<curr_date> '
-                             'in file backup or <dest_dir>/<database>/<backup>-<curr_date> if database backup',
-                        type=os.path.abspath,
-                        metavar='directory')
+    parser = argparse.ArgumentParser(add_help=False)
+    parser.add_argument('action', choices=DEFAULTS['BACKUP_TYPE_CHOICES'].keys())
+    action_arg = parser.parse_known_args()[0].action
+    parser.add_argument('-d', '--destDir', required=True, type=os.path.abspath,
+                        help='Destination directory where backup will be stored, backup will be created as sub '
+                             'directory of directory specified here in format <dest_dir>/backup-<curr_date> '
+                             'in file backup or <dest_dir>/<database>/<backup>-<curr_date> if database backup')
+    parser.add_argument('-f', '--format', default=PLAIN_FORMAT, choices=DEFAULTS['FORMAT_CHOICES'],
+                        help=f'Selects the format of the output backup, default is {PLAIN_FORMAT}')
+    parser.add_argument('-o', '--owner',  default=DEFAULTS['OWNER'], help=f'User which will be owner of backup files, default is {DEFAULTS["OWNER"]}',)
+    parser.add_argument('-m', '--max', type=int, default=DEFAULTS['MAX'],
+                        help=f'Number of max backup directories, if there will be more than '
+                             f'specified number the oldest backup will be deleted, default is {DEFAULTS["MAX"]}')
+    if action_arg == FILE_BACKUP or action_arg == DATABASE_BACKUP:
+        if not is_type_local():
+            parser.add_argument('-u', '--user', required=True, help='User')
+            parser.add_argument('-H', '--hostAddress', type=ipaddress.IPv4Address,
+                                help=f'This option allows to specify IP address to bind to', required=True)
+            parser.add_argument('--hostsFile', default=DEFAULTS['HOSTS_FILE'],
+                                help=f'File with hosts, default path is {DEFAULTS["HOSTS_FILE"]}')
+            parser.add_argument('--tryStartHost', action='store_true', help='Sends WOL packet to host if ping is not successful')
+        else:
+            parser.set_defaults(hostsFile=DEFAULTS["HOSTS_FILE"], user='local', hostAddress=DEFAULTS['HOST_ADDRESS'])
+        password_args = parser.add_mutually_exclusive_group()
+        password_args.add_argument('-p', '--password', help='Not essential option, script by default will take password from file defined in --passwdFile')
+        password_args.add_argument('--passwdFile', default=set_default_password_file(), help=f'File with password, default path is {set_default_password_file()}')
+    if action_arg == FILE_BACKUP:
+        parser.add_argument('type', choices=DEFAULTS['BACKUP_TYPE_CHOICES'][FILE_BACKUP])
+        parser.add_argument('-s', '--sourceDirs', required=True, nargs='+', help='These directories which will be part of backup, all data from these directories will be recursively copied to directory from -d/--destDir')
+        parser.add_argument('-e', '--exclude', nargs='+', help='Exclude files or directory matching pattern/s')
+    elif action_arg == DATABASE_BACKUP:
+        parser.add_argument('type', choices=DEFAULTS['BACKUP_TYPE_CHOICES'][DATABASE_BACKUP])
+        parser.add_argument('-P', '--port', required=True, help='Database port')
+        parser.add_argument('-D', '--databases', required=True, nargs='+', help='Database list')
+    elif action_arg == GIT_BACKUP:
+        parser.add_argument('type', choices=DEFAULTS['BACKUP_TYPE_CHOICES'][GIT_BACKUP])
+        token_args = parser.add_mutually_exclusive_group()
+        token_args.add_argument('-t', '--token', help='Token to connect with git')
+        token_args.add_argument('--tokenFile', default=DEFAULTS['PASSWD_FILE']['GITHUB'], help=f'File with token, default file is {DEFAULTS["PASSWD_FILE"]["GITHUB"]}')
+        parser.add_argument('-r', '--repositories', nargs='+', required=not is_all_repositories(), help='Repository list')
+        parser.add_argument('-a', '--all', action='store_true', help='All repositories will be copied')
 
-    '''parser.add_argument('-d', '--destDir',
-                        help='Destination directory where backup will be stored, backup will be created '
-                             'as sub directory of directory specified here in format <dest_dir>/backup-<curr_date> '
-                             'in file backup or <dest_dir>/<database>/<backup>-<curr_date> if database backup',
-                        type=os.path.abspath,
-                        metavar='directory')
-    parser.add_argument('-f', '--format',
-                        help=f'Selects the format of the output backup, default is {PLAIN_FORMAT}',
-                        choices=DEFAULTS['FORMAT_CHOICES'],
-                        default=PLAIN_FORMAT)
-    parser.add_argument('-o', '--owner',
-                        help=f'User which will be owner of the output backup, default is {DEFAULTS["OWNER"]}',
-                        type=str,
-                        metavar='user',
-                        default=DEFAULTS['OWNER'])
-    parser.add_argument('-m', '--max',
-                        help=f'Number of max backup directories, if there will be more than specified number the oldest backup will be deleted, default is {DEFAULTS["MAX"]}',
-                        type=int,
-                        metavar='number',
-                        default=DEFAULTS['MAX'])'''
-    '''
-    if is_database_action(args.action):
-        db_parser = argparse.ArgumentParser(add_help=False)
-        db_parser.add_argument('-D', '--databases',
-                            nargs='+',
-                            help='Specifies the name of the databases to dump',
-                            type=str,
-                            metavar='database1',
-                            required=is_database_backup())
-        db_parser.add_argument('-P', '--dbPort',
-                            help='Database port, only usable when --database backup',
-                            type=int,
-                            metavar='port',
-                            required=is_database_backup())
-    elif is_file_action(args.action):
-        print('file')
-        file_parser = argparse.ArgumentParser(add_help=False)
-        file_parser.add_argument('-s', '--sourceDirs',
-                            nargs='+',
-                            metavar='path1',
-                            help='All directories which will be part of backup, all data from these directories '
-                                 'will be recursively copied to directory from -d/--destDir',
-                            required=is_file_backup())
-        file_parser.add_argument('-e', '--exclude',
-                            help='Exclude files or directory matching pattern/s',
-                            type=str,
-                            nargs='+',
-                            metavar='pattern')
-        file_parser.add_argument('--daemonPasswdFile',
-                            help=f'File with password for rsync user to establish connection in rsync by daemon, default is {DEFAULTS["PASSWD_FILE"]["DAEMON"]}',
-                            type=str,
-                            metavar='file',
-                            default=DEFAULTS['PASSWD_FILE']['DAEMON'])
-        file_parser.add_argument('--sshPasswdFile',
-                            help=f'File with password for rsync user to establish connection in rsync via ssh, default is {DEFAULTS["PASSWD_FILE"]["SSH"]}',
-                            type=str,
-                            metavar='file',
-                            default=DEFAULTS['PASSWD_FILE']['SSH'])
-    if is_file_action(args.action) or is_database_action(args.action):
-        file_db_parser = argparse.ArgumentParser(add_help=False)
-        file_db_parser.add_argument('-H', '--hostAddress',
-                            help=f'This option allows to specify IP address to bind to, default is {DEFAULTS["HOST_ADDRESS"]}',
-                            type=ipaddress.IPv4Address,
-                            metavar='ip_address',
-                            default=DEFAULTS['HOST_ADDRESS'])
-        file_db_parser.add_argument('-u', '--user',
-                            help='User name to connect as to make database dump or establish connection by rsync',
-                            type=str,
-                            metavar='username',
-                            required=is_database_backup() or (not is_localhost() and is_file_backup()))
-        file_db_parser.add_argument('-p', '--password',
-                            help='This option is not essential, if --nopasswd is not defined script will be prompt for password',
-                            type=str,
-                            metavar='password_plain')
-        file_db_parser.add_argument('--tryStartHost',
-                            help='Choose this option if you want send WOL packet to host if ping is not successful',
-                            action='store_true')
-        file_db_parser.add_argument('--hostsFile',
-                            help=f'File with hosts, default is {DEFAULTS["HOSTS_FILE"]}',
-                            type=str,
-                            metavar='file',
-                            default=DEFAULTS['HOSTS_FILE'])
-    if is_git_action(args.action):
-        git_parser = argparse.ArgumentParser(add_help=False)
-        git_parser.add_argument('-t', '--token',
-                            type=str,
-                            help='Fine-grainted access token generated in GitHub account settings')
-        git_parser.add_argument('--tokenFile',
-                            help=f'File with Fine-grainted access token to GitHub API',
-                            type=str,
-                            metavar='file')
-
-    args2 = main_parser.parse_args()
-    print(args2)
-
-    #
-    #action_subparser.add_parser('file', parents=[file_parser])
-    #action_subparser.add_parser('database', parents=[db_parser])
-    #action_subparser.add_parser('git', parents=[git_parser])
-    #if args.action == 'file':
-    '''
-    #return parser.parse_args()
-
-def parse_args2():
-    parser = argparse.ArgumentParser(prog='PROG', add_help=True)
-    print(sys.argv[1])
-    parser.add_argument('action', choices=['file', 'database'])
-    action_arg = parser.parse_known_args()
-    print(action_arg)
-    group1 = parser.add_argument_group('group1', 'group1 description')
-    group1.add_argument('--groupOne')
-    group2 = parser.add_argument_group('group2', 'group1 description')
-    group2.add_argument('--groupTwo')
-    parser.parse_args()
+    parser.add_argument('-h', '--help', action='help')
+    return parser.parse_args()
 
 
 if __name__ == "__main__":
-    args = parse_args2()
-    '''if args.password is None and not args.nopasswd and args.user:
-        args.password = getpass(prompt=f'Enter password for {args.user} user: ')
-    elif args.type in DEFAULTS['FILE_BACKUP_CHOICES'] and args.type != LOCAL_BACKUP and args.hostAddress is DEFAULTS['HOST_ADDRESS']:  # if backup is not local, bot host address points to localhost
-        raise ValueError(f'selected value "{args.type}" in --type arg requires -h/--hostAddress different than default {DEFAULTS["HOST_ADDRESS"]}')
+    args = parse_args()
     try:
-        host = Host(args.hostAddress, args.hostsFile)
-        if host.ip_address is not DEFAULTS['HOST_ADDRESS'] and not host.is_up(10):
-            if args.tryStartHost:
-                host.start()
-                if not host.is_up(120):
-                    raise ConnectionError(f'Request timeout to {host}, host did not answer to WOL packet')
-            else:
-                raise ConnectionError(f'Request timeout to {host}')
-        if args.type in DEFAULTS['DATABASE_BACKUP_CHOICES']:
-            for database in args.databases:
-                backup = DatabaseBackup(args.type, host, args.user, args.password, args.nopasswd, os.path.join(args.destDir, database), args.max, args.owner, args.format, database, args.dbPort)
+        if args.action == FILE_BACKUP or args.action == DATABASE_BACKUP:
+            host = Host(args.hostAddress, args.hostsFile)
+            if host.ip_address is not DEFAULTS['HOST_ADDRESS'] and not host.is_up(10):
+                if args.tryStartHost:
+                    host.start()
+                    if not host.is_up(120):
+                        raise ConnectionError(f'Request timeout to {host}, host did not answer to WOL packet')
+                else:
+                    raise ConnectionError(f'Request timeout to {host}')
+            if args.type in DEFAULTS['BACKUP_TYPE_CHOICES'][DATABASE_BACKUP]:
+                for database in args.databases:
+                    backup = DatabaseBackup(args.type, host, args.user, args.password, args.passwdFile, os.path.join(args.destDir, database), args.max, args.owner, args.format, database, args.port)
+                    if backup.get_num() > backup.max:
+                        oldest_backup = backup.get_oldest_backup()
+                        backup.remove_backup(oldest_backup)
+                    backup.create()
+            else:  # if DEFAULTS['FILE_BACKUP_CHOICES'].contains(args.type)
+                backup = FileBackup(args.type, host, args.user, args.password, args.destDir, args.max, args.owner, args.format, args.passwdFile, args.sourceDirs, args.exclude)
                 if backup.get_num() > backup.max:
-                    backup.remove_oldest()
+                    oldest_backup = backup.get_oldest_backup()
+                    backup.remove_backup(oldest_backup)
                 backup.create()
-        else:  # if DEFAULTS['FILE_BACKUP_CHOICES'].contains(args.type)
-            backup = FileBackup(args.type, host, args.user, args.password, args.nopasswd, args.destDir, args.max, args.owner, args.format, args.daemonPasswdFile, args.sshPasswdFile, args.sourceDirs, args.exclude)
+        else:  # git backup backup_type, dest_dir, max_num, owner, output_format, token, token_file, repositories
+            backup = GitBackup(args.type, args.destDir, args.max, args.owner, args.format, args.token, args.tokenFile, args.repositories)
             if backup.get_num() > backup.max:
-                backup.remove_oldest()
+                oldest_backup = backup.get_oldest_backup()
+                backup.remove_backup(oldest_backup)
             backup.create()
     except (ValueError, ConnectionError, OSError) as e:
         logging.error(f'{os.path.basename(__file__)}: {e}')
         print(f'{os.path.basename(__file__)}: {e}')
-        
-    '''
