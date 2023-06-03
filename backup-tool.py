@@ -149,6 +149,8 @@ class Host:
 
 
 class Backup:
+    MIN_SIZE = 800  # bytes
+    
     def __init__(self, backup_type, parent_dir, max_num, owner, output_format):
         self.type = backup_type
         self.parent_dir = parent_dir
@@ -211,10 +213,11 @@ class Backup:
             self.dest_dir = f'{self.dest_dir}.tar.gz'
         elif self.format == PLAIN_FORMAT:
             pass
-        if Backup.get_dir_size(self.dest_dir) > 800:  # bytes
+        if Backup.get_dir_size(self.dest_dir) > MIN_SIZE:
+            self.set_privileges()
             logging.info(f'COMPLETE: backup success "{self}"')
         else:
-            logging.error(f'ERROR: backup "{self}" failed, size is less than 500 B, deleting directory with backup...')
+            logging.error(f'ERROR: backup "{self}" failed, size is less than {MIN_SIZE} B, deleting directory with backup...')
             backup.remove_backup(self.dest_dir)
             logging.info(f'failed backup "{self}" deleted')
             print(f'ERROR: backup "{self}" failed, size is less than 500 B, backup directory has been deleted')
