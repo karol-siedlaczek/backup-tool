@@ -48,7 +48,6 @@ DEFAULTS = {
 
 logging.basicConfig(filename=DEFAULTS['LOG_FILE'], format='%(asctime)s %(name)s %(levelname)s %(message)s', datefmt='%Y-%m-%d %H:%M:%S', level=logging.DEBUG)
 
-
 class Host:
     network = 'eth0'
     ip_address_pattern = r'\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}'
@@ -157,6 +156,15 @@ class Backup:
         self.format = output_format
         self.dest_dir = self.set_dest_dir()
 
+    def delete_oldest_backups(self):
+        is_old_backup_to_delete = True
+        while is_old_backup_to_delete:
+            if self.get_num() >= self.max:
+                oldest_backup = self.get_oldest_backup()
+                self.remove_backup(oldest_backup)
+            else:
+                is_old_backup_to_delete = False
+
     def get_num(self):
         try:
             count = 0
@@ -178,9 +186,9 @@ class Backup:
 
     def remove_backup(self, backup_path):
         try:
-            regex_pattern = r'^backup-[0-9]{4}-[0-9]{2}-[0-9]{2}$|^backup-[0-9]{4}-[0-9]{2}-[0-9]{2}\.tar\.gz$'  # to avoid deleting unexpected directory when user provide wrong path
+            regex_pattern = r'backup-[0-9]{4}-[0-9]{2}-[0-9]{2}(\.tar\.gz)?$'  # to avoid deleting unexpected directory when user provide wrong path
             logging.info(f'deleting backup "{backup_path}" in progress...')
-            if re.match(regex_pattern, backup_path):
+            if re.search(regex_pattern, backup_path):
                 shutil.rmtree(backup_path)
                 logging.debug(f'oldest backup "{backup_path}" has been deleted')
             else:
@@ -456,21 +464,15 @@ if __name__ == "__main__":
             if args.type in DEFAULTS['BACKUP_TYPE_CHOICES'][DATABASE_BACKUP]:
                 for database in args.databases:
                     backup = DatabaseBackup(args.type, host, args.user, args.password, args.passwdFile, os.path.join(args.destDir, database), args.max, args.owner, args.format, database, args.port)
-                    if backup.get_num() > backup.max:
-                        oldest_backup = backup.get_oldest_backup()
-                        backup.remove_backup(oldest_backup)
+                    backup.delete_oldest_backups()
                     backup.create()
             else:  # if DEFAULTS['FILE_BACKUP_CHOICES'].contains(args.type)
                 backup = FileBackup(args.type, host, args.user, args.password, args.destDir, args.max, args.owner, args.format, args.passwdFile, args.sourceDirs, args.exclude)
-                if backup.get_num() > backup.max:
-                    oldest_backup = backup.get_oldest_backup()
-                    backup.remove_backup(oldest_backup)
+                backup.delete_oldest_backups()
                 backup.create()
         else:  # git backup backup_type, dest_dir, max_num, owner, output_format, token, token_file, repositories
             backup = GitBackup(args.type, args.destDir, args.max, args.owner, args.format, args.token, args.tokenFile, args.repositories)
-            if backup.get_num() > backup.max:
-                oldest_backup = backup.get_oldest_backup()
-                backup.remove_backup(oldest_backup)
+            backup.delete_oldest_backups()
             backup.create()
     except (ValueError, ConnectionError, OSError) as e:
         logging.error(f'{os.path.basename(__file__)}: {e}')
