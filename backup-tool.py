@@ -12,6 +12,7 @@ import argparse
 import git
 import github
 import ipaddress
+import subprocess
 from datetime import datetime
 from dateutil.relativedelta import relativedelta
 
@@ -141,14 +142,13 @@ class Host:
         return True
 
     def __str__(self):
-        if self.name is None:
-            return str(self.ip_address)
-        else:
+        try:
             return self.name
+        except AttributeError:
+            return str(self.ip_address)
 
 
 class Backup:
-    MIN_SIZE = 800  # bytes
     
     def __init__(self, backup_type, parent_dir, max_num, owner, output_format):
         self.type = backup_type
@@ -157,11 +157,12 @@ class Backup:
         self.owner = owner
         self.format = output_format
         self.dest_dir = self.set_dest_dir()
+        self.failed = False
 
     def delete_oldest_backups(self):
         is_old_backup_to_delete = True
         while is_old_backup_to_delete:
-            if self.get_num() >= self.max:
+            if self.get_num() > self.max:
                 oldest_backup = self.get_oldest_backup()
                 self.remove_backup(oldest_backup)
             else:
@@ -172,7 +173,8 @@ class Backup:
             count = 0
             backups = os.listdir(self.parent_dir)
             for backup in backups:
-                if os.path.isdir(os.path.join(self.parent_dir, backup)):
+                backup_path = os.path.join(self.parent_dir, backup)
+                if os.path.isdir(backup_path) and Backup.is_backup_file(backup_path):
                     count += 1
             return int(count)
         except FileNotFoundError:
@@ -182,17 +184,16 @@ class Backup:
         os.chdir(self.parent_dir)
         files = sorted(os.listdir(os.getcwd()), key=os.path.getmtime)  # files[0] is the oldest file, files[-1] is the newest
         for entry in files:
-            if os.path.isdir(entry):  # looking for first dir in array, so it will find the oldest dir
+            if os.path.isdir(entry) and Backup.is_backup_file(entry):  # looking for first dir in array, so it will find the oldest dir
                 logging.info(f'max ({self.max}) num of backups exceeded, oldest backup "{entry}" will be deleted')
                 return entry
 
     def remove_backup(self, backup_path):
         try:
-            regex_pattern = r'backup-[0-9]{4}-[0-9]{2}-[0-9]{2}(\.tar\.gz)?$'  # to avoid deleting unexpected directory when user provide wrong path
-            logging.info(f'deleting backup "{backup_path}" in progress...')
-            if re.search(regex_pattern, backup_path):
+            logging.debug(f'deleting backup "{backup_path}" in progress...')
+            if Backup.is_backup_file(backup_path):
                 shutil.rmtree(backup_path)
-                logging.debug(f'oldest backup "{backup_path}" has been deleted')
+                logging.info(f'backup "{backup_path}" has been deleted')
             else:
                 logging.warning(f'backup not deleted, name of "{backup_path}" does not fit to backup pattern filename')
         except PermissionError as e:
@@ -219,16 +220,16 @@ class Backup:
             os.system(f'tar -czf {backup_file}.tar.gz {backup_file} && rm -rf {backup_file}')
             logging.info(f'backup "{self.dest_dir}" archived to package')
             self.dest_dir = f'{self.dest_dir}.tar.gz'
-        elif self.format == PLAIN_FORMAT:
-            pass
-        if Backup.get_dir_size(self.dest_dir) > MIN_SIZE:
+        # elif self.format == PLAIN_FORMAT:
+        #    pass
+
+        if self.failed:
+            logging.error(f'backup "{self}" failed, returned exit code is 0, directory for backup will be deleted')
+            backup.remove_backup(self.dest_dir)
+            print(f'ERROR: backup "{self}" failed, returned exit code is 0, directory for backup will be deleted')
+        else:
             self.set_privileges()
             logging.info(f'COMPLETE: backup success "{self}"')
-        else:
-            logging.error(f'ERROR: backup "{self}" failed, size is less than {MIN_SIZE} B, deleting directory with backup...')
-            backup.remove_backup(self.dest_dir)
-            logging.info(f'failed backup "{self}" deleted')
-            print(f'ERROR: backup "{self}" failed, size is less than 500 B, backup directory has been deleted')
 
     @staticmethod
     def get_dir_size(path):
@@ -240,6 +241,11 @@ class Backup:
                 elif entry.is_dir():
                     total_size += Backup.get_dir_size(entry.path)
         return total_size
+
+    @staticmethod
+    def is_backup_file(backup_path):
+        backup_regex = r'backup-[0-9]{4}-[0-9]{2}-[0-9]{2}(\.tar\.gz)?$'  # to avoid deleting unexpected directory when user provide wrong path
+        return re.search(backup_regex, backup_path)
 
     def __repr__(self):
         return self.dest_dir
@@ -257,7 +263,8 @@ class FileDatabaseBackup(Backup):
         logging.debug(f'cmd: {self.cmd if self.password is None else self.cmd.replace(self.password, "****")}')
 
     def create(self):
-        os.system(self.cmd)
+        exit_code = subprocess.call(self.cmd, shell=True)
+        self.failed = False if exit_code == 0 else True
         super().create()
 
 
@@ -404,6 +411,7 @@ def set_default_password_file():
             return f"'{DEFAULTS['PASSWD_FILE']['MYSQL']}' if '{MYSQL_BACKUP}' type or '{DEFAULTS['PASSWD_FILE']['PSQL']}' if '{PSQL_BACKUP}' type"
     except IndexError:
         return False
+
 
 def parse_args():
     parser = argparse.ArgumentParser(add_help=False)
