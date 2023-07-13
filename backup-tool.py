@@ -366,14 +366,14 @@ class GitBackup(Backup):
             if not os.path.isfile(token_file):
                 raise OSError(f'Token file "{token_file}" does not exist, use -t/--token to input token as arg or create this file')
             with open(token_file, 'r') as f:
-                return f.read().replace('\n', ' ')
+                return f.read().replace('\n', '')
 
 
 def run_command(command):
     process = subprocess.run(command, stdin=subprocess.DEVNULL, stderr=subprocess.PIPE, stdout=subprocess.PIPE, timeout=15, shell=True)
     return_code = process.returncode
     output = process.stderr if process.stderr else process.stdout
-    return output.decode('utf-8').replace('\n', ''), return_code
+    return output.decode('utf-8').replace('\n', ' '), return_code
 
 
 def clean_errors_in_log(log_file, since):
