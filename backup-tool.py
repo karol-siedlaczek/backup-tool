@@ -26,18 +26,21 @@ MYSQL_BACKUP = 'mysql'
 GITHUB_BACKUP = 'github'
 TAR_FORMAT = 'tar'
 PLAIN_FORMAT = 'plain'
+CLEAN_ERRORS = 'clean-errors'
 
 DEFAULTS = {
     'HOST_ADDRESS': ipaddress.IPv4Address('127.0.0.1'),
     'LOG_FILE': os.path.abspath(os.path.join('/var', 'log', f'{os.path.basename(__file__).split(".")[0]}.log')),
+    'LOG_LEVEL': 1,
     'OWNER': 'root',
     'MAX': 10,  # max number of backups, if max number will be exceeded the oldest file backup be deleted
     'HOSTS_FILE': os.path.abspath(os.path.join(os.sep, 'etc', 'hosts')),
     'FORMAT_CHOICES': [PLAIN_FORMAT, TAR_FORMAT],
-    'BACKUP_TYPE_CHOICES': {
+    'ACTION_CHOICES': {
         FILE_BACKUP: [LOCAL_BACKUP, REMOTE_BACKUP],
         DATABASE_BACKUP: [PSQL_BACKUP, MYSQL_BACKUP],
-        GIT_BACKUP: [GITHUB_BACKUP]
+        GIT_BACKUP: [GITHUB_BACKUP],
+        CLEAN_ERRORS: None
     },
     'PASSWD_FILE': {
         'RSYNC': os.path.join(os.path.expanduser("~"), '.rsyncpass'),
@@ -46,8 +49,6 @@ DEFAULTS = {
         'GITHUB': os.path.join(os.path.expanduser("~"), '.github-token',)
     },
 }
-
-logging.basicConfig(filename=DEFAULTS['LOG_FILE'], format='%(asctime)s %(name)s %(levelname)s %(message)s', datefmt='%Y-%m-%d %H:%M:%S', level=logging.DEBUG)
 
 class Host:
     network = 'eth0'
@@ -149,6 +150,7 @@ class Host:
 
 
 class Backup:
+    dest_dir = None
     
     def __init__(self, backup_type, parent_dir, max_num, owner, output_format):
         self.type = backup_type
@@ -156,19 +158,20 @@ class Backup:
         self.max = max_num
         self.owner = owner
         self.format = output_format
-        self.dest_dir = self.set_dest_dir()
+        self.__set_dest_dir()
         self.failed = False
+        self.msg = None
 
     def delete_oldest_backups(self):
         is_old_backup_to_delete = True
         while is_old_backup_to_delete:
-            if self.get_num() > self.max:
-                oldest_backup = self.get_oldest_backup()
-                self.remove_backup(oldest_backup)
+            if self.__get_num() > self.max:
+                oldest_backup = self.__get_oldest_backup()
+                self.__remove_backup(oldest_backup)
             else:
                 is_old_backup_to_delete = False
 
-    def get_num(self):
+    def __get_num(self):
         try:
             count = 0
             backups = os.listdir(self.parent_dir)
@@ -180,7 +183,7 @@ class Backup:
         except FileNotFoundError:
             return 0  # no parent directory for backups means no backup
 
-    def get_oldest_backup(self):
+    def __get_oldest_backup(self):
         os.chdir(self.parent_dir)
         files = sorted(os.listdir(os.getcwd()), key=os.path.getmtime)  # files[0] is the oldest file, files[-1] is the newest
         for entry in files:
@@ -188,7 +191,7 @@ class Backup:
                 logging.info(f'max ({self.max}) num of backups exceeded, oldest backup "{entry}" will be deleted')
                 return entry
 
-    def remove_backup(self, backup_path):
+    def __remove_backup(self, backup_path):
         try:
             logging.debug(f'deleting backup "{backup_path}" in progress...')
             if Backup.is_backup_file(backup_path):
@@ -200,17 +203,17 @@ class Backup:
             logging.error(f'{os.path.basename(__file__)}: {e}, cannot delete backup "{backup_path}"')
             print(f'{os.path.basename(__file__)}: an error has occurred, check {DEFAULTS["LOG_FILE"]} for more information')
 
-    def set_privileges(self):
+    def __set_privileges(self):
         timestamp = datetime.now().strftime('%Y%m%d%H%M.%S')
         os.system(f'touch -t {timestamp} {self.dest_dir}')
         os.system(f'chown -R {self.owner}:{self.owner} {self.dest_dir}')
         os.system(f'chmod 440 {self.dest_dir}')
 
-    def set_dest_dir(self):
+    def __set_dest_dir(self):
         path = os.path.join(self.parent_dir, f'backup-{get_today()}')
         if not os.path.exists(path):
             os.makedirs(path)
-        return path
+        self.dest_dir = path
 
     def create(self):
         if self.format == TAR_FORMAT:
@@ -224,23 +227,12 @@ class Backup:
         #    pass
 
         if self.failed:
-            logging.error(f'backup "{self}" failed, returned exit code is 0, directory for backup will be deleted')
-            backup.remove_backup(self.dest_dir)
-            print(f'ERROR: backup "{self}" failed, returned exit code is 0, directory for backup will be deleted')
+            logging.error(f'backup "{self}" failed with message "{self.msg}", directory for backup will be deleted')
+            self.__remove_backup(self.dest_dir)
+            print(f'ERROR: backup "{self}" failed with message "{self.msg}", directory for backup will be deleted')
         else:
-            self.set_privileges()
+            self.__set_privileges()
             logging.info(f'COMPLETE: backup success "{self}"')
-
-    @staticmethod
-    def get_dir_size(path):
-        total_size = 0
-        with os.scandir(path) as directory:
-            for entry in directory:
-                if entry.is_file():
-                    total_size += entry.stat().st_size
-                elif entry.is_dir():
-                    total_size += Backup.get_dir_size(entry.path)
-        return total_size
 
     @staticmethod
     def is_backup_file(backup_path):
@@ -263,8 +255,8 @@ class FileDatabaseBackup(Backup):
         logging.debug(f'cmd: {self.cmd if self.password is None else self.cmd.replace(self.password, "****")}')
 
     def create(self):
-        exit_code = subprocess.call(self.cmd, shell=True)
-        self.failed = False if exit_code == 0 else True
+        self.msg, return_code = run_command(self.cmd)
+        self.failed = False if return_code == 0 else True
         super().create()
 
 
@@ -377,6 +369,33 @@ class GitBackup(Backup):
                 return f.read().replace('\n', '')
 
 
+def run_command(command):
+    process = subprocess.run(command, stdin=subprocess.DEVNULL, stderr=subprocess.PIPE, stdout=subprocess.PIPE, timeout=15, shell=True)
+    return_code = process.returncode
+    output = process.stderr if process.stderr else process.stdout
+    return output.decode('utf-8').replace('\n', ''), return_code
+
+
+def clean_errors_in_log(log_file, since):
+    regex = r'^(?P<timestamp>[0-9]{4}-[0-9]{2}-[0-9]{2}\s[0-9]{2}:[0-9]{2}:[0-9]{2})\s(?P<user>\S*)\s(?P<level>\S*)\s(?P<msg>.*)$'
+
+    new_lines = []
+    with open(log_file, 'r') as f:
+        for index, line in enumerate(f.readlines()):
+            try:
+                result = re.search(regex, line)
+                if datetime.strptime(result.group('timestamp'), '%Y-%m-%d %H:%M:%S') > since and result.group('level') in ['ERROR', 'CRITICAL']:
+                    line = f'{result.group("timestamp")} {result.group("user")} {result.group("level")}_HANDLED {result.group("msg")}\n'
+                    print(f"{index}: line '{line.strip()}' has been marked as handled")
+            except AttributeError:
+                pass
+            finally:
+                new_lines.append(line)
+
+    with open(log_file, 'w') as f:
+        f.writelines(new_lines)
+
+
 def get_today():
     return (datetime.now()).strftime('%Y-%m-%d')
 
@@ -413,20 +432,32 @@ def set_default_password_file():
         return False
 
 
+def valid_date(value):
+    try:
+        return datetime.strptime(value, "%Y-%m-%d")
+    except ValueError:
+        raise argparse.ArgumentTypeError(f'Value "{value}" is not a valid date in "%Y-%m-%d" format')
+
+
 def parse_args():
     parser = argparse.ArgumentParser(add_help=False)
-    parser.add_argument('action', choices=DEFAULTS['BACKUP_TYPE_CHOICES'].keys())
+    parser.add_argument('action', choices=DEFAULTS['ACTION_CHOICES'].keys())
     action_arg = parser.parse_known_args()[0].action
-    parser.add_argument('-d', '--destDir', required=True, type=os.path.abspath,
-                        help='Destination directory where backup will be stored, backup will be created as sub '
-                             'directory of directory specified here in format <dest_dir>/backup-<curr_date> '
-                             'in file backup or <dest_dir>/<database>/<backup>-<curr_date> if database backup')
-    parser.add_argument('-f', '--format', default=PLAIN_FORMAT, choices=DEFAULTS['FORMAT_CHOICES'],
-                        help=f'Selects the format of the output backup, default is {PLAIN_FORMAT}')
-    parser.add_argument('-o', '--owner',  default=DEFAULTS['OWNER'], help=f'User which will be owner of backup files, default is {DEFAULTS["OWNER"]}',)
-    parser.add_argument('-m', '--max', type=int, default=DEFAULTS['MAX'],
-                        help=f'Number of max backup directories, if there will be more than '
-                             f'specified number the oldest backup will be deleted, default is {DEFAULTS["MAX"]}')
+    if not action_arg == CLEAN_ERRORS:
+        parser.add_argument('-d', '--destDir', required=True, type=os.path.abspath,
+                            help='Destination directory where backup will be stored, backup will be created as sub '
+                                 'directory of directory specified here in format <dest_dir>/backup-<curr_date> '
+                                 'in file backup or <dest_dir>/<database>/<backup>-<curr_date> if database backup')
+        parser.add_argument('-f', '--format', default=PLAIN_FORMAT, choices=DEFAULTS['FORMAT_CHOICES'],
+                            help=f'Selects the format of the output backup, default is {PLAIN_FORMAT}')
+        parser.add_argument('-o', '--owner',  default=DEFAULTS['OWNER'], help=f'User which will be owner of backup files, default is {DEFAULTS["OWNER"]}',)
+        parser.add_argument('-m', '--max', type=int, default=DEFAULTS['MAX'],
+                            help=f'Number of max backup directories, if there will be more than '
+                                 f'specified number the oldest backup will be deleted, default is {DEFAULTS["MAX"]}')
+    parser.add_argument('-v', '--verbose', action='count', default=DEFAULTS['LOG_LEVEL'],
+                        help=f'Default verbose level is {DEFAULTS["LOG_LEVEL"]}')
+    parser.add_argument('--logFile', '-l', default=DEFAULTS['LOG_FILE'],
+                        help=f'Define log file, default is {DEFAULTS["LOG_FILE"]}')
     if action_arg == FILE_BACKUP or action_arg == DATABASE_BACKUP:
         if not is_type_local():
             parser.add_argument('-u', '--user', required=True, help='User')
@@ -441,27 +472,31 @@ def parse_args():
         password_args.add_argument('-p', '--password', help='Not essential option, script by default will take password from file defined in --passwdFile')
         password_args.add_argument('--passwdFile', default=set_default_password_file(), help=f'File with password, default path is {set_default_password_file()}')
     if action_arg == FILE_BACKUP:
-        parser.add_argument('type', choices=DEFAULTS['BACKUP_TYPE_CHOICES'][FILE_BACKUP])
+        parser.add_argument('type', choices=DEFAULTS['ACTION_CHOICES'][FILE_BACKUP])
         parser.add_argument('-s', '--sourceDirs', required=True, nargs='+', help='These directories which will be part of backup, all data from these directories will be recursively copied to directory from -d/--destDir')
         parser.add_argument('-e', '--exclude', nargs='+', help='Exclude files or directory matching pattern/s')
     elif action_arg == DATABASE_BACKUP:
-        parser.add_argument('type', choices=DEFAULTS['BACKUP_TYPE_CHOICES'][DATABASE_BACKUP])
+        parser.add_argument('type', choices=DEFAULTS['ACTION_CHOICES'][DATABASE_BACKUP])
         parser.add_argument('-P', '--port', required=True, help='Database port')
         parser.add_argument('-D', '--databases', required=True, nargs='+', help='Database list')
     elif action_arg == GIT_BACKUP:
-        parser.add_argument('type', choices=DEFAULTS['BACKUP_TYPE_CHOICES'][GIT_BACKUP])
+        parser.add_argument('type', choices=DEFAULTS['ACTION_CHOICES'][GIT_BACKUP])
         token_args = parser.add_mutually_exclusive_group()
         token_args.add_argument('-t', '--token', help='Token to connect with git')
         token_args.add_argument('--tokenFile', default=DEFAULTS['PASSWD_FILE']['GITHUB'], help=f'File with token, default file is {DEFAULTS["PASSWD_FILE"]["GITHUB"]}')
         parser.add_argument('-r', '--repositories', nargs='+', required=not is_all_repositories(), help='Repository list')
         parser.add_argument('-a', '--all', action='store_true', help='All repositories will be copied')
-
+    elif action_arg == CLEAN_ERRORS:
+        parser.add_argument('-s', '--since', type=valid_date, default=get_today(),
+                            help="Time from which errors in log file should be cleaned")
     parser.add_argument('-h', '--help', action='help')
     return parser.parse_args()
 
 
 if __name__ == "__main__":
     args = parse_args()
+    logging.basicConfig(filename=args.logFile, format='%(asctime)s %(name)s %(levelname)s %(message)s', datefmt='%Y-%m-%d %H:%M:%S', level=30 - (10 * args.verbose) if args.verbose > 0 else 0)
+
     try:
         if args.action == FILE_BACKUP or args.action == DATABASE_BACKUP:
             host = Host(args.hostAddress, args.hostsFile)
@@ -472,19 +507,21 @@ if __name__ == "__main__":
                         raise ConnectionError(f'Request timeout to {host}, host did not answer to WOL packet')
                 else:
                     raise ConnectionError(f'Request timeout to {host}')
-            if args.type in DEFAULTS['BACKUP_TYPE_CHOICES'][DATABASE_BACKUP]:
+            if args.type in DEFAULTS['ACTION_CHOICES'][DATABASE_BACKUP]:
                 for database in args.databases:
                     backup = DatabaseBackup(args.type, host, args.user, args.password, args.passwdFile, os.path.join(args.destDir, database), args.max, args.owner, args.format, database, args.port)
                     backup.delete_oldest_backups()
                     backup.create()
-            else:  # if DEFAULTS['FILE_BACKUP_CHOICES'].contains(args.type)
+            else:
                 backup = FileBackup(args.type, host, args.user, args.password, args.destDir, args.max, args.owner, args.format, args.passwdFile, args.sourceDirs, args.exclude)
                 backup.delete_oldest_backups()
                 backup.create()
-        else:  # git backup backup_type, dest_dir, max_num, owner, output_format, token, token_file, repositories
+        elif args.action == CLEAN_ERRORS:
+            clean_errors_in_log(args.logFile, args.since)
+        else:
             backup = GitBackup(args.type, args.destDir, args.max, args.owner, args.format, args.token, args.tokenFile, args.repositories)
             backup.delete_oldest_backups()
             backup.create()
-    except (ValueError, ConnectionError, OSError) as e:
+    except (ValueError, ConnectionError, OSError, subprocess.TimeoutExpired) as e:
         logging.error(f'{os.path.basename(__file__)}: {e}')
         print(f'{os.path.basename(__file__)}: {e}')
