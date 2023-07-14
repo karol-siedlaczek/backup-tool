@@ -376,7 +376,7 @@ class GitBackup(Backup):
             raise GitError(f"{response.reason} ({response.status_code}): {json_content['message']}")
 
 def run_command(command):
-    process = subprocess.run(command, stdin=subprocess.DEVNULL, stderr=subprocess.PIPE, stdout=subprocess.PIPE, timeout=15, shell=True)
+    process = subprocess.run(command, stdin=subprocess.DEVNULL, stderr=subprocess.PIPE, stdout=subprocess.PIPE, shell=True)
     return_code = process.returncode
     output = process.stderr if process.stderr else process.stdout
     return output.decode('utf-8').replace('\n', ' '), return_code
