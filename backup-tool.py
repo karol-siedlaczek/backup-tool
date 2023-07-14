@@ -275,7 +275,7 @@ class FileBackup(FileDatabaseBackup):
             password_file = None
         if password_file and not self.password and not os.path.isfile(password_file):
             raise OSError(f'Password file "{password_file}" does not exist, use -p/--password to input password as arg or create this file')
-        self._password_file = password_file
+        self.password_file = password_file
 
     def set_cmd(self):  # TO DO (add exclude dirs)
         log_file = f'--info=progress2 > {os.path.join(self.dest_dir, "rsync.log")}'
@@ -313,7 +313,7 @@ class DatabaseBackup(FileDatabaseBackup):
     def __set_password_file(self, file_with_password):
         if file_with_password and not self.password and not os.path.isfile(file_with_password):
             raise OSError(f'Password file "{file_with_password}" does not exist, use -p/--password to input password as arg or create this file, see details how to create this file in {self.type} docs')
-        self._password_file = file_with_password
+        self.password_file = file_with_password
 
     def set_cmd(self):
         log_file = os.path.join(self.dest_dir, "dump.log")
