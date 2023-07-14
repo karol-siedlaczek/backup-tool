@@ -279,7 +279,7 @@ class FileBackup(FileDatabaseBackup):
 
     def set_cmd(self):  # TO DO (add exclude dirs)
         log_file = f'--info=progress2 > {os.path.join(self.dest_dir, "rsync.log")}'
-        base_cmd = 'rsync -altv'
+        base_cmd = 'rsync --stats -altv'
         if self.excluded_dirs:
             exclude_args = ' '.join(f'--exclude "{directory}"' for directory in self.excluded_dirs)
             base_cmd = f'{base_cmd} {exclude_args}'
@@ -374,6 +374,7 @@ class GitBackup(Backup):
             return json_content
         else:
             raise GitError(f"{response.reason} ({response.status_code}): {json_content['message']}")
+
 
 def run_command(command):
     process = subprocess.run(command, stdin=subprocess.DEVNULL, stderr=subprocess.PIPE, stdout=subprocess.PIPE, shell=True)
