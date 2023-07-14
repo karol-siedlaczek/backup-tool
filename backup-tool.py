@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-
+import json
 import os
 import re
 import sys
@@ -9,13 +9,15 @@ import time
 import shutil
 import logging
 import argparse
+import requests
 import git
+from git import GitError
 import github
 import ipaddress
 import subprocess
+from github.GithubException import BadCredentialsException
 from datetime import datetime
 from dateutil.relativedelta import relativedelta
-
 FILE_BACKUP = 'file'
 DATABASE_BACKUP = 'database'
 GIT_BACKUP = 'git'
@@ -151,7 +153,7 @@ class Host:
 
 class Backup:
     dest_dir = None
-    
+
     def __init__(self, backup_type, parent_dir, max_num, owner, output_format):
         self.type = backup_type
         self.parent_dir = parent_dir
@@ -161,6 +163,12 @@ class Backup:
         self.__set_dest_dir()
         self.failed = False
         self.msg = None
+
+    def __set_dest_dir(self):
+        path = os.path.join(self.parent_dir, f'backup-{get_today()}')
+        if not os.path.exists(path):
+            os.makedirs(path)
+        self.dest_dir = path
 
     def delete_oldest_backups(self):
         is_old_backup_to_delete = True
@@ -207,30 +215,21 @@ class Backup:
         timestamp = datetime.now().strftime('%Y%m%d%H%M.%S')
         os.system(f'touch -t {timestamp} {self.dest_dir}')
         os.system(f'chown -R {self.owner}:{self.owner} {self.dest_dir}')
-        os.system(f'chmod 440 {self.dest_dir}')
-
-    def __set_dest_dir(self):
-        path = os.path.join(self.parent_dir, f'backup-{get_today()}')
-        if not os.path.exists(path):
-            os.makedirs(path)
-        self.dest_dir = path
+        os.system(f'chmod 400 {self.dest_dir}')
 
     def create(self):
-        if self.format == TAR_FORMAT:
-            logging.info(f'archiving backup "{self.dest_dir}"...')
-            os.chdir(self.parent_dir)
-            backup_file = os.path.basename(os.path.normpath(self.dest_dir))
-            os.system(f'tar -czf {backup_file}.tar.gz {backup_file} && rm -rf {backup_file}')
-            logging.info(f'backup "{self.dest_dir}" archived to package')
-            self.dest_dir = f'{self.dest_dir}.tar.gz'
-        # elif self.format == PLAIN_FORMAT:
-        #    pass
-
         if self.failed:
             logging.error(f'backup "{self}" failed with message "{self.msg}", directory for backup will be deleted')
             self.__remove_backup(self.dest_dir)
             print(f'ERROR: backup "{self}" failed with message "{self.msg}", directory for backup will be deleted')
         else:
+            if self.format == TAR_FORMAT:
+                logging.info(f'archiving backup "{self.dest_dir}"...')
+                os.chdir(self.parent_dir)
+                backup_file = os.path.basename(os.path.normpath(self.dest_dir))
+                os.system(f'tar -czf {backup_file}.tar.gz {backup_file} && rm -rf {backup_file}')
+                logging.info(f'backup "{self.dest_dir}" archived to package')
+                self.dest_dir = f'{self.dest_dir}.tar.gz'
             self.__set_privileges()
             logging.info(f'COMPLETE: backup success "{self}"')
 
@@ -261,18 +260,15 @@ class FileDatabaseBackup(Backup):
 
 
 class FileBackup(FileDatabaseBackup):
+    password_file = None
+
     def __init__(self, backup_type, host, user, password, dest_dir, max_num, owner, output_format, rsync_password_file, source_dirs, excluded_dirs):
         super().__init__(backup_type, host, user, password, dest_dir, max_num, owner, output_format)
-        self.password_file = rsync_password_file
+        self.__set_password_file(rsync_password_file)
         self.source_dirs = source_dirs
         self.excluded_dirs = excluded_dirs
 
-    @property
-    def password_file(self):
-        return self._password_file
-
-    @password_file.setter
-    def password_file(self, rsync_password_file):
+    def __set_password_file(self, rsync_password_file):
         if self.type == REMOTE_BACKUP:
             password_file = rsync_password_file
         else:  # LOCAL_BACKUP type
@@ -306,18 +302,15 @@ class FileBackup(FileDatabaseBackup):
 
 
 class DatabaseBackup(FileDatabaseBackup):
+    password_file = None
+
     def __init__(self, backup_type, host, user, password, password_file, dest_dir, max_num, owner, output_format, database, port):
         super().__init__(backup_type, host, user, password, dest_dir, max_num, owner, output_format)
-        self.password_file = password_file
+        self.__set_password_file(password_file)
         self.database = database
         self.port = port
 
-    @property
-    def password_file(self):
-        return self
-
-    @password_file.setter
-    def password_file(self, file_with_password):
+    def __set_password_file(self, file_with_password):
         if file_with_password and not self.password and not os.path.isfile(file_with_password):
             raise OSError(f'Password file "{file_with_password}" does not exist, use -p/--password to input password as arg or create this file, see details how to create this file in {self.type} docs')
         self._password_file = file_with_password
@@ -343,31 +336,44 @@ class DatabaseBackup(FileDatabaseBackup):
 
 
 class GitBackup(Backup):
-    def __init__(self, backup_type, dest_dir, max_num, owner, output_format, token, token_file, repositories):
+    token = None
+
+    def __init__(self, backup_type, dest_dir, max_num, owner, output_format, token, token_file, allowed_repos):
         super().__init__(backup_type, dest_dir, max_num, owner, output_format)
-        git_token = self.get_token(token, token_file)
-        self.git = github.Github(git_token)
-        self.repositories = repositories if repositories else []
+        self.__set_token(token, token_file)
+        self.allow_repos = allowed_repos if allowed_repos else []
 
-    def create(self):
-        user = self.git.get_user()
-        logging.info(f'START: backup "{self}" in progress, GitHub repositories from "{user.raw_data["login"]}" account, repo list: "{user.raw_data["repos_url"]}"')
-        self.set_dest_dir()
-        for repo in user.get_repos():
-            if repo.name in self.repositories or not self.repositories:
-                logging.info(f'cloning "{repo.name}" to "{self.dest_dir}/{repo.name}"...')
-                git.Repo.clone_from(repo.clone_url, f'{self.dest_dir}/{repo.name}')
-        super().create()
-
-    def get_token(self, token, token_file):
+    def __set_token(self, token, token_file):
         if token:
-            return token
+            self.token = token
         elif token_file:
             if not os.path.isfile(token_file):
                 raise OSError(f'Token file "{token_file}" does not exist, use -t/--token to input token as arg or create this file')
             with open(token_file, 'r') as f:
-                return f.read().replace('\n', '')
+                self.token = f.read().strip()
 
+    def create(self):
+        try:
+            repos = self.get_repos()
+            logging.info(f'START: backup "{self}" in progress, GitHub repositories from "{repos[0]["owner"]["login"]}" account')
+            for repo in repos:
+                if repo['name'] in self.allow_repos or not self.allow_repos:
+                    msg, return_code = run_command(f'git clone https://ouath2:{self.token}@github.com/{repo["full_name"]}.git {self.dest_dir}/{repo["owner"]["login"]}/{repo["name"]}')
+                    if return_code != 0:
+                        raise GitError(msg)
+        except GitError as e:
+            self.failed = True
+            self.msg = e
+        finally:
+            super().create()
+
+    def get_repos(self):
+        response = requests.get('https://api.github.com/user/repos', headers={'Authorization': f'token {self.token}'})
+        json_content = json.loads(response.content.decode('utf-8'))
+        if response.ok:
+            return json_content
+        else:
+            raise GitError(f"{response.reason} ({response.status_code}): {json_content['message']}")
 
 def run_command(command):
     process = subprocess.run(command, stdin=subprocess.DEVNULL, stderr=subprocess.PIPE, stdout=subprocess.PIPE, timeout=15, shell=True)
