@@ -16,6 +16,7 @@ import ipaddress
 import subprocess
 from datetime import datetime
 from dateutil.relativedelta import relativedelta
+
 FILE_BACKUP = 'file'
 DATABASE_BACKUP = 'database'
 GIT_BACKUP = 'git'
@@ -49,6 +50,7 @@ DEFAULTS = {
         'GITHUB': os.path.join(os.path.expanduser("~"), '.github-token',)
     },
 }
+
 
 class Host:
     network = 'eth0'
