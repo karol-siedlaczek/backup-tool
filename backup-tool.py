@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+
 import json
 import os
 import re
@@ -10,12 +11,9 @@ import shutil
 import logging
 import argparse
 import requests
-import git
 from git import GitError
-import github
 import ipaddress
 import subprocess
-from github.GithubException import BadCredentialsException
 from datetime import datetime
 from dateutil.relativedelta import relativedelta
 FILE_BACKUP = 'file'
