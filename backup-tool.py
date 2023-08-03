@@ -127,7 +127,7 @@ class Host:
         start_timestamp = datetime.strptime(datetime.now().strftime('%H:%M:%S'), '%H:%M:%S')
         end_timestamp = start_timestamp + relativedelta(seconds=+timeout)  # setting up timeout
         waiting = True
-        logging.info(f'checking if "{self}" is up...')
+        print(f'checking if "{self}" is up...')
         while waiting:
             response = os.popen(f'ping -c 1 {self}').read()  # for linux -c, for windows -n
             if re.search('[Dd]estination [Hh]ost [Uu]nreachable', response) or \
@@ -137,7 +137,7 @@ class Host:
                 time.sleep(1)
                 print(f'waiting for {self}...')
                 if datetime.now().strftime("%H:%M:%S") >= end_timestamp.strftime("%H:%M:%S"):
-                    logging.error(f'Request timed out, {self} did not response to ping in {int((end_timestamp - start_timestamp).total_seconds())} seconds')
+                    logging.warning(f'Request timed out, {self} did not response to ping in {int((end_timestamp - start_timestamp).total_seconds())} seconds')
                     return False
             else:
                 logging.info(f'host "{self}" is up')
