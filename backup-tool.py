@@ -46,7 +46,7 @@ DEFAULTS = {
     'PASSWD_FILE': {
         'RSYNC': os.path.join(os.path.expanduser("~"), '.rsyncpass'),
         'PSQL': os.path.join(os.path.expanduser("~"), '.pgpass'),
-        'MYSQL': os.path.join(os.path.expanduser("~"), '.my.cnf',),
+        'MYSQL': os.path.join(os.path.expanduser("~"), '.backup-tool.my.cnf',),
         'GITHUB': os.path.join(os.path.expanduser("~"), '.github-token',)
     },
 }
@@ -323,7 +323,7 @@ class DatabaseBackup(FileDatabaseBackup):
             if self.password:
                 self.cmd = f'PGPASSWORD={self.password} {self.cmd}'
         elif self.type == MYSQL_BACKUP:
-            self.cmd = f'mysqldump -h {self.host.ip_address} -P {self.port} -u {self.user} -v'
+            self.cmd = f'mysqldump -h {self.host.ip_address} -P {self.port} -u {self.user} --option-files={self.password_file} -v'
             if self.password:
                 self.cmd = f'{self.cmd} --password={self.password}'
             self.cmd = f'{self.cmd} {self.database} > {sql_file} 2> {log_file}'
