@@ -44,10 +44,10 @@ DEFAULTS = {
         CLEAN_ERRORS: None
     },
     'PASSWD_FILE': {
-        'RSYNC': os.path.join(os.path.expanduser("~"), '.rsyncpass'),
-        'PSQL': os.path.join(os.path.expanduser("~"), '.pgpass'),
+        'RSYNC': os.path.join(os.path.expanduser("~"), '.backup-tool.rsyncpass'),
+        'PSQL': os.path.join(os.path.expanduser("~"), '.backup-tool.pgpass'),
         'MYSQL': os.path.join(os.path.expanduser("~"), '.backup-tool.my.cnf',),
-        'GITHUB': os.path.join(os.path.expanduser("~"), '.github-token',)
+        'GITHUB': os.path.join(os.path.expanduser("~"), '.backup-tool.github.token',)
     },
 }
 
@@ -140,6 +140,7 @@ class Host:
                     logging.warning(f'Request timed out, {self} did not response to ping in {int((end_timestamp - start_timestamp).total_seconds())} seconds')
                     return False
             else:
+                print(f'host "{self}" is up')
                 logging.info(f'host "{self}" is up')
                 waiting = False
         return True
@@ -322,10 +323,14 @@ class DatabaseBackup(FileDatabaseBackup):
             self.cmd = f'pg_dump -h {self.host.ip_address} -p {self.port} -U {self.user} -v {self.database} > {sql_file} 2> {log_file}'
             if self.password:
                 self.cmd = f'PGPASSWORD={self.password} {self.cmd}'
+            elif self.password_file:
+                self.cmd = f'PGPASSFILE={self.password_file} {self.cmd}'
         elif self.type == MYSQL_BACKUP:
-            self.cmd = f'mysqldump -h {self.host.ip_address} -P {self.port} -u {self.user} --option-files={self.password_file} -v'
+            self.cmd = f'-h {self.host.ip_address} -P {self.port} -u {self.user} -v'
             if self.password:
-                self.cmd = f'{self.cmd} --password={self.password}'
+                self.cmd = f'mysqldump --password={self.password} {self.cmd}'
+            elif self.password_file:
+                self.cmd = f'mysqldump --defaults-file={self.password_file} {self.cmd}'
             self.cmd = f'{self.cmd} {self.database} > {sql_file} 2> {log_file}'
         super().set_cmd()
 
