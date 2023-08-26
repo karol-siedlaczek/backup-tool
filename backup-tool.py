@@ -44,10 +44,10 @@ DEFAULTS = {
         CLEAN_ERRORS: None
     },
     'PASSWD_FILE': {
-        'RSYNC': os.path.join(os.path.expanduser("~"), '.backup-tool.rsyncpass'),
-        'PSQL': os.path.join(os.path.expanduser("~"), '.backup-tool.pgpass'),
-        'MYSQL': os.path.join(os.path.expanduser("~"), '.backup-tool.my.cnf',),
-        'GITHUB': os.path.join(os.path.expanduser("~"), '.backup-tool.github.token',)
+        'RSYNC': os.path.join(os.path.expanduser("~"), '.backup-tool/.rsyncpass'),
+        'PSQL': os.path.join(os.path.expanduser("~"), '.backup-tool/.pgpass'),
+        'MYSQL': os.path.join(os.path.expanduser("~"), '.backup-tool/.my.cnf',),
+        'GITHUB': os.path.join(os.path.expanduser("~"), '.backup-tool/.github.token',)
     },
 }
 
