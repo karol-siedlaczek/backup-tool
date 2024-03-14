@@ -44,10 +44,10 @@ DEFAULTS = {
         CLEAN_ERRORS: None
     },
     'PASSWD_FILE': {
-        'RSYNC': os.path.join(os.path.expanduser("~"), '.backup-tool.rsyncpass'),
-        'PSQL': os.path.join(os.path.expanduser("~"), '.backup-tool.pgpass'),
-        'MYSQL': os.path.join(os.path.expanduser("~"), '.backup-tool.my.cnf',),
-        'GITHUB': os.path.join(os.path.expanduser("~"), '.backup-tool.github.token',)
+        'RSYNC': os.path.join(os.path.expanduser("~"), '.backup-tool/.rsyncpass'),
+        'PSQL': os.path.join(os.path.expanduser("~"), '.backup-tool/.pgpass'),
+        'MYSQL': os.path.join(os.path.expanduser("~"), '.backup-tool/.my.cnf',),
+        'GITHUB': os.path.join(os.path.expanduser("~"), '.backup-tool/.github.token',)
     },
 }
 
@@ -197,7 +197,7 @@ class Backup:
         files = sorted(os.listdir(os.getcwd()), key=os.path.getmtime)  # files[0] is the oldest file, files[-1] is the newest
         for entry in files:
             if os.path.isdir(entry) and Backup.is_backup_file(entry):  # looking for first dir in array, so it will find the oldest dir
-                logging.info(f'max ({self.max}) num of backups exceeded, oldest backup "{entry}" will be deleted')
+                logging.info(f'max ({self.max}) num of backups exceeded, oldest backup "{self.parent_dir}/{entry}" will be deleted')
                 return entry
 
     def __remove_backup(self, backup_path):
