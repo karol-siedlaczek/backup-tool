@@ -1,9 +1,0 @@
-default:
-  log_file: "/var/log/backup-tool-2.log"
-  hosts_file: "/etc/hosts"
-  max: 10
-  formats:
-    - RAW: raw
-    - raw
-    - package
-    - encrypted_package
