@@ -16,6 +16,7 @@ DEFAULTS = {
     'LOG_LEVEL': 1,
     'CONFIG_FILE': 'backup-tool.yaml',
     'REQUIRED_COMMON_PARAMS': ['nsca_host', 'nsca_port', 'nagios_host', 'nagios_service', 'base_dest', 'log_file', 'hosts_file', 'state_file'],
+    'ALLOWED_FORMATS': ['package', 'encrypted_package', 'raw']
     # 'ACTIONS': {
     #     'RUN': 'run',  # Run active target
     #     'CLEAN_ERRORS': 'clean-errors',  # Clean error lines from log file
