@@ -5,9 +5,9 @@ import os
 import sys
 import yaml
 import json
-import struct
 import socket
 import argparse
+from datetime import datetime
 from wakeonlan import send_magic_packet
 import subprocess
 import logging as log
@@ -47,17 +47,17 @@ class State():
     def __init__(self, state_file) -> None:
         self.state_file = state_file
         try:
-            with open(state_file, 'r') as f: 
+            with open(self.state_file, 'r') as f: 
                 self.state = yaml.safe_load(f)
         except FileNotFoundError:
-            self.state = self.__init_state_file(state_file)
+            self.state = self.__init_state_file()
         finally:
             if not isinstance(self.state, dict):
-                self.state = self.__init_state_file(state_file)
+                self.state = self.__init_state_file()
     
-    def __init_state_file(self, state_file) -> dict:
-        open(state_file, 'w').close()
-        os.chmod(state_file, 0o640)
+    def __init_state_file(self) -> dict:
+        open(self.state_file, 'w').close()
+        os.chmod(self.state_file, 0o640)
         return {}
         
     def set_target_status(self, target_name, msg, code) -> None:
@@ -72,9 +72,9 @@ class State():
         log.info(f"State change {old_state} > {self.state[target_name]['status']}: {msg}")
         
     def remove_undefined_targets(self, defined_targets) -> None:
-        state_targets = list(self.state.keys())
+        targets_in_state_file = list(self.state.keys())
         
-        for target in state_targets:
+        for state_target in targets_in_state_file:
             if target not in defined_targets:
                 del self.state[target]
         with open(self.state_file, 'w') as f:
@@ -119,9 +119,10 @@ class Nsca():
 
 
 class Target():
-    def __init__(self, name, conf, default_conf) -> None:
+    def __init__(self, name, base_dest, conf, default_conf) -> None:
         self.name = name
         self.backup_file = None
+        self.dest = os.path.join(base_dest, self.name)
         required_conf_params = ['format', 'owner', 'password_file', 'permissions', 'max', 'type']
         self.set_required_params(conf, default_conf, required_conf_params)
                 
@@ -152,20 +153,25 @@ class Target():
             return int(count)
         except FileNotFoundError:
             return 0
+    
+    def get_oldest_backup(self) -> str:
+        old_cwd = os.getcwd()
+        os.chdir(self.dest)
+        backups = sorted(os.listdir(), key=os.path.getmtime)
+        os.chdir(old_cwd)
         
-    def delete_oldest_backup(self) -> None:
-        log.info()
-        
-    def __remove_backup() -> None:
+        for backup in backups:
+            if Backup.is_valid_backup(backup):
+                return os.path.join(self.dest, backup)
+            
+    def remove_backup() -> None:
         pass
         
     
-    
 class PullTarget(Target):
     def __init__(self, name, base_dest, conf, default_conf) -> None:
-        super().__init__(name, conf, default_conf)
+        super().__init__(name, base_dest, conf, default_conf)
         self.set_required_params(conf, default_conf, ['src', 'timeout'])
-        self.dest = os.path.join(base_dest, self.name)
         self.wake_on_lan = bool(conf.get('wake_on_lan'))
         
         if self.wake_on_lan:
@@ -204,8 +210,8 @@ class PullTarget(Target):
         
 
 class PushTarget(Target):
-    def __init__(self, name, conf, default_conf) -> None:
-        super().__init__(name, conf, default_conf)
+    def __init__(self, name, base_dest, conf, default_conf) -> None:
+        super().__init__(name, base_dest, conf, default_conf)
         self.set_required_params(conf, default_conf, ['path', 'check_date'])
         
     def __str__(self):
@@ -273,9 +279,30 @@ def run_cmd(cmd):
     output = process.stderr if process.stderr else process.stdout
     return output.decode('utf-8').replace('\n', ' '), return_code
     
+
+def find_oldest(directory):
+    date_regex = r'([\d]{4}-[\d]{2}-[\d]{2}_[\d]{2}:[\d]{2})'
+    old_cwd = os.getcwd()
+    os.chdir(directory)
+    backups = sorted(os.listdir(), key=os.path.getmtime)
+    print(backups)
+    oldest_backup = None
+    for backup_file in backups:
+        if Backup.is_valid_backup(backup_file):
+            date_str = re.search(date_regex, backup_file).group(1)
+            date = datetime.strptime(date_str, '%Y-%m-%d_%H:%M')
+            if not 
+            print(date)
+            print(os.path.join(directory, backup_file))
     
+    
+    os.chdir(old_cwd)
+    return None
+
 if __name__ == "__main__":
     args = parse_args()
+    print(find_oldest('test'))
+    sys.exit(0)
 
     with open(DEFAULTS['CONFIG_FILE'], "r") as f:
         conf = yaml.safe_load(f)
@@ -292,7 +319,7 @@ if __name__ == "__main__":
             
             if target_conf:
                 if target_conf.get('type') == 'push':
-                    target = PushTarget(target, target_conf, conf.get('default'))
+                    target = PushTarget(target, common_conf.get('base_dest'), target_conf, conf.get('default'))
                 else:
                     target = PullTarget(target, common_conf.get('base_dest'), target_conf, conf.get('default'))
             else:
@@ -304,14 +331,12 @@ if __name__ == "__main__":
                     target.send_wol_packet()
             
             if target.backup_count >= target.max:
-                log.info(f"Max ({target.max}) number of backups exceeded, oldest backup will be deleted")
-                target.delete_oldest_backup()
-            
-            
+                oldest_backup = target.get_oldest_backup()
+                log.info(f"Max ({target.max}) number of backups exceeded, oldest backup '{oldest_backup}' will be deleted")
+                target.remove_backup(oldest_backup)
+                
             target.dump_conf()
-            print(target)
         
-            
             state.set_target_status(target.name, 'backup-today', NAGIOS['OK'])
         except TargetException as error:
             log.error(error)
