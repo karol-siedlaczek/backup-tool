@@ -23,11 +23,6 @@ DEFAULTS = {
         'ENCRYPTED_PACKAGE': 'encrypted_package',
         'RAW': 'raw'
     }
-    # 'ACTIONS': {
-    #     'RUN': 'run',  # Run active target
-    #     'CLEAN_ERRORS': 'clean-errors',  # Clean error lines from log file
-    #     'CHECK': 'check'  # Check if passive target arrived to dest paths in correct time 
-    # }
 }
 
 NAGIOS = {
