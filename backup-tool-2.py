@@ -465,6 +465,7 @@ if __name__ == "__main__":
                     target = PullTarget(target, common_conf.get('base_dest'), target_conf, conf.get('default'))
             else:
                 raise TargetException(f'Target not defined in "{DEFAULTS["CONFIG_FILE"]}"')
+            log.info('Start processing target')
             
             if type(target) == PullTarget:
                 #target.validate_connection()
