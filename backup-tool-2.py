@@ -376,7 +376,7 @@ class PullTarget(Target):
             exclude_args = ' '.join(f'--exclude "{exclude_arg}"' for exclude_arg in self.exclude)
             base_cmd = f'{base_cmd} {exclude_args}'
         source_args = ' '.join(directory for directory in self.sources)
-        cmd = f'{base_cmd} --contimeout=60 --password-file="{self.password_file}" {source_args} {new_backup_path}'
+        cmd = f'{base_cmd} --contimeout={self.timeout} --password-file="{self.password_file}" {source_args} {new_backup_path}'
 
         os.makedirs(new_backup_path, exist_ok=True)
         log.debug(f"Pulling backup using rsync with command: {cmd}")
