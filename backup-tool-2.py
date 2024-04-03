@@ -81,95 +81,7 @@ class Nsca():
         for nagios_status, nagios_code in NAGIOS.items():
             if code == nagios_code: return nagios_status
         return 'UNKNOWN'
-
-
-class Backup():
-    DATE_FORMAT = '%Y-%m-%d_%H-%M'
-    
-    def __init__(self, path) -> None:
-        self.path = path
-        directory, package = os.path.split(self.path)
-        self.directory = directory
-        self.package = package
-        
-        if self.__is_valid_backup():
-            date_regex = r'([\d]{4}-[\d]{2}-[\d]{2}_[\d]{2}-[\d]{2})'
-            self.date = datetime.strptime(re.search(date_regex, package).group(1), self.DATE_FORMAT)
-            self.manifest_file = None
-        else:
-            raise NameError(f"File '{path}' has not valid filename for backup")
-    
-    def __is_valid_backup(self) -> bool:  # Matches only filenames created by backup tool
-        regex = r'^backup-[\d]{4}-[\d]{2}-[\d]{2}_[\d]{2}-[\d]{2}|\.tar\.gz|\.gpg$'
-        return bool(re.match(regex, self.package))
-    
-    @property
-    def size(self) -> int:
-        return os.stat(self.path).st_size
-       
-    @property
-    def display_size(self) -> str:
-        if self.size == 0:
-            return '0B'
-        size_names = ('B', 'KB', 'MB', 'GB', 'TB', 'PB', 'EB', 'ZB', 'YB')
-        i = int(math.floor(math.log(self.size, 1024)))
-        p = math.pow(1024, i)
-        display_size = round(self.size / p, 2)
-        return f'{display_size} {size_names[i]}'
-    
-    def set_package(self, new_package) -> None:
-        self.path = os.path.join(self.directory, new_package)
-        self.package = new_package
-    
-    def remove(self) -> None:
-        try:
-            log.info(f"Deleting backup '{self}' in progress...")
-            
-            for file_to_delete in [self.path, self.__get_manifest_file()]:
-                try:
-                    shutil.rmtree(file_to_delete)
-                except NotADirectoryError:
-                    os.remove(file_to_delete)
-
-            log.info(f"Backup '{self}' deleted [{self.display_size}]")
-        except PermissionError as error:
-            raise TargetException(f"Cannot delete backup '{self}', reason: {error}")
-    
-    def __get_manifest_file(self) -> str:  # TODO - FIX, it could raise IndexError when manifest file does not exit
-        return self.manifest_file if self.manifest_file else glob(f'{self.directory}/manifests/manifest-{self.date.strftime(Backup.DATE_FORMAT)}*')[0]
-    
-    def create_manifest_file(self, format, encryption_key=None) -> None:
-        manifest_file = os.path.join(self.directory, 'manifests', f'manifest-{self.date.strftime(Backup.DATE_FORMAT)}.txt')
-        os.makedirs(os.path.join(self.directory, 'manifests'), exist_ok=True)
-        result = Cmd.run(f'find "{self.path}" -printf "%AF %AT\t%s\t%p\n" > "{manifest_file}"')
-        encrypting_failed = False
-        packed_manifest_file = None
-        if result.failed:
-            raise TargetException(f"Getting content to manifest file from {self.path} failed: [{result.code}] {result.output}")
-        
-        if format == DEFAULTS['FORMATS']['ENCRYPTED_PACKAGE']:
-            packed_manifest_file = manifest_file.replace('.txt', '.tar.gz.gpg')
-            if encryption_key:
-                result = Cmd.run(f'tar czO "{manifest_file}" | gpg2 -er "{encryption_key}" --always-trust > "{packed_manifest_file}" && rm -rf "{manifest_file}"')
-            else:
-                log.warning(f"Backup {self.path} is encrypted, but no encryption key is provided to encrypt manifest file {manifest_file}, manifest file will be only created as package")
-                encrypting_failed = True
-        if format == DEFAULTS['FORMATS']['PACKAGE'] or encrypting_failed:
-            packed_manifest_file = manifest_file.replace('.txt', '.tar.gz')
-            result = Cmd.run(f'tar czf "{packed_manifest_file}" "{manifest_file}" && rm -rf "{manifest_file}"')    
-        
-        if result and result.failed:
-            raise TargetException(f"Creating manifest file to {manifest_file} failed: [{result.code}] {result.output}")
-        self.manifest_file = packed_manifest_file if packed_manifest_file else manifest_file
-
-    @staticmethod
-    def get_today_backup_name() -> str:
-        return f'backup-{datetime.now().strftime(Backup.DATE_FORMAT)}'
-        
-    def __str__(self) -> str:
-        return self.path
-            
-
+           
 class State():
     def __init__(self, state_file) -> None:
         self.state_file = state_file
@@ -196,7 +108,7 @@ class State():
         }
         with open(self.state_file, 'w') as f:
             yaml.safe_dump(self.state, f)
-        log.info(f"State change {old_state} > {self.state[str(target_name)]['status']}: {msg}")
+        log.info(f"State change from {old_state} state to {self.state[str(target_name)]['status']}")
         
     def remove_undefined_targets(self, defined_targets) -> None:
         targets_in_state_file = list(self.state.keys())
@@ -223,6 +135,107 @@ class State():
             summary += f"{target_state.get('status')}: [{target}] {target_state.get('msg')}</br>"
         return summary
 
+class Backup():
+    DATE_FORMAT = '%Y-%m-%d_%H-%M'
+    
+    def __init__(self, path) -> None:
+        self.path = path
+        directory, package = os.path.split(self.path)
+        self.directory = directory
+        self.package = package
+        
+        if self.__is_valid_backup():
+            date_regex = r'([\d]{4}-[\d]{2}-[\d]{2}_[\d]{2}-[\d]{2})'
+            self.date = datetime.strptime(re.search(date_regex, package).group(1), self.DATE_FORMAT)
+            self.size = Backup.get_dir_size(self.path) if os.path.isdir(self.path) else os.stat(self.path).st_size
+            self.incremental_file = os.path.join(self.directory, 'incremental.snapshot')
+            self.manifest_file = None
+        else:
+            raise NameError(f"File '{path}' has not valid filename for backup")
+    
+    def __is_valid_backup(self) -> bool:  # Matches only filenames created by backup tool
+        regex = r'^backup-[\d]{4}-[\d]{2}-[\d]{2}_[\d]{2}-[\d]{2}|\.tar\.gz|\.gpg$'
+        return bool(re.match(regex, self.package))
+       
+    @property
+    def display_size(self) -> str:
+        if self.size == 0:
+            return '0B'
+        size_names = ('B', 'KB', 'MB', 'GB', 'TB', 'PB', 'EB', 'ZB', 'YB')
+        i = int(math.floor(math.log(self.size, 1024)))
+        p = math.pow(1024, i)
+        display_size = round(self.size / p, 2)
+        return f'{display_size} {size_names[i]}'
+
+    def remove(self) -> None:
+        try:
+            log.info(f"Deleting backup '{self}' in progress...")
+            files_to_delete = [self.path]
+            manifest_file = self.__get_manifest_file()
+            if manifest_file:
+                files_to_delete.append(manifest_file)
+            for file_to_delete in files_to_delete:
+                try:
+                    shutil.rmtree(file_to_delete)
+                except NotADirectoryError:
+                    os.remove(file_to_delete)
+            log.info(f"Backup '{self}' deleted [{self.display_size}]")
+        except PermissionError as error:
+            raise TargetException(f"Cannot delete backup '{self}', reason: {error}")
+    
+    def __get_manifest_file(self) -> str:
+        if self.manifest_file:
+            return self.manifest_file
+        else:
+            try:
+                return glob(f'{self.directory}/manifests/manifest-{self.date.strftime(Backup.DATE_FORMAT)}*')[0]
+            except IndexError:
+                return None
+    
+    def create_manifest_file(self, format, encryption_key=None) -> None:
+        manifest_file = os.path.join(self.directory, 'manifests', f'manifest-{self.date.strftime(Backup.DATE_FORMAT)}.txt')
+        os.makedirs(os.path.join(self.directory, 'manifests'), exist_ok=True)
+        result = Cmd.run(f'find "{self.path}" -printf "%AF %AT\t%s\t%p\n" > "{manifest_file}"')
+        encrypting_failed = False
+        packed_manifest_file = None
+
+        if result.failed:
+            raise TargetException(f"Getting content to manifest file from '{self.path}' failed: [{result.code}] {result.output}")
+        
+        if format == DEFAULTS['FORMATS']['ENCRYPTED_PACKAGE']:
+            packed_manifest_file = manifest_file.replace('.txt', '.tar.gz.gpg')
+            if encryption_key:
+                result = Cmd.run(f'tar czO "{manifest_file}" | gpg2 -er "{encryption_key}" --always-trust > "{packed_manifest_file}" && rm -rf "{manifest_file}"')
+            else:
+                log.warning(f"Backup '{self.path}' is encrypted, but no encryption key is provided to encrypt manifest file {manifest_file}, manifest file will be only created as package")
+                encrypting_failed = True
+        if format == DEFAULTS['FORMATS']['PACKAGE'] or encrypting_failed:
+            packed_manifest_file = manifest_file.replace('.txt', '.tar.gz')
+            result = Cmd.run(f'tar czf "{packed_manifest_file}" "{manifest_file}" && rm -rf "{manifest_file}"')    
+        
+        if result and result.failed:
+            raise TargetException(f"Creating manifest file to '{manifest_file}' failed: [{result.code}] {result.output}")
+        self.manifest_file = packed_manifest_file if packed_manifest_file else manifest_file
+        log.info(f"Manifest file created in '{self.manifest_file}'")
+
+    @staticmethod
+    def get_today_backup_name() -> str:
+        return f'backup-{datetime.now().strftime(Backup.DATE_FORMAT)}'
+    
+    @staticmethod
+    def get_dir_size(path='.') -> int:
+        total = 0
+        with os.scandir(path) as it:
+            for entry in it:
+                if entry.is_file():
+                    total += entry.stat().st_size
+                elif entry.is_dir():
+                    total += Backup.get_dir_size(entry.path)
+        return total
+        
+    def __str__(self) -> str:
+        return self.path
+    
 
 class Target():
     def __init__(self, name, base_dest, conf, default_conf) -> None:
@@ -234,7 +247,7 @@ class Target():
         self.set_required_params(conf, default_conf, required_conf_params)
         
         if self.format not in DEFAULTS['FORMATS'].values():
-            raise TargetException(f"Target has unknown backup format, possible choices: {DEFAULTS['FORMATS'].values()}")
+            raise TargetException(f"Target has unknown backup format ({self.format}), possible choices: {DEFAULTS['FORMATS'].values()}")
         elif self.format == DEFAULTS['FORMATS']['ENCRYPTED_PACKAGE']:
             if conf.get('encryption_key'):
                 self.encryption_key = conf['encryption_key']
@@ -243,7 +256,7 @@ class Target():
             else:
                 raise TargetException("To encrypt backup package parameter 'encryption_key' need to be defined")
                 
-    def set_required_params(self, conf, default_conf, params):
+    def set_required_params(self, conf, default_conf, params) -> None:
         for param in params:
             value = conf.get(param)
             if value:
@@ -288,39 +301,54 @@ class Target():
             return oldest_backup
         except FileNotFoundError:
             return None
-        
-    def create_backup(self) -> Backup:
+    
+    def get_latest_backup(self) -> Backup | None:
         try:
-            self.backup.create_manifest_file(self.format, self.encryption_key)
+            latest_backup = None
+            
+            for backup_package in os.listdir(self.dest):
+                try:
+                    backup = Backup(os.path.join(self.dest, backup_package))
+                    if not latest_backup or backup.date > latest_backup.date:
+                        latest_backup = backup
+                except NameError:
+                    continue
+            return latest_backup
+        except FileNotFoundError:
+            return None
+        
+    def create_backup(self, new_backup_path) -> Backup:
+        backup = Backup(new_backup_path)
+        
+        try:
+            backup.create_manifest_file(self.format, self.encryption_key)
         except TargetException as error:
-            self.backup.remove()
+            backup.remove()
             raise TargetException(error)
         
         if self.format == DEFAULTS['FORMATS']['PACKAGE']:
-            package = f"{self.backup.path}.tar.gz"
-            self.backup.set_package(package)
-            log.info(f"Packing backup to {self.backup.path}...")
-            cmd = f'tar -pigz -cf "{package}" "{self.backup.path}" && rm -rf "{self.backup.path}"'
-            success_msg = f"Backup successfully packed to {self.backup.path}"
+            new_path = f"{backup.path}.tar.gz"
+            log.info(f"Packing backup to '{new_path}'...")
+            cmd = f'tar -g "{backup.incremental_file}" -piz -cf "{new_path}" "{backup.path}" && rm -rf "{backup.path}"'
+            success_msg = f"Backup successfully packed to '{new_path}'"
         elif self.format == DEFAULTS['FORMATS']['ENCRYPTED_PACKAGE']:
-            package = f"{self.backup.path}.tar.gz.gpg"
-            self.backup.set_package(package)
-            log.info(f"Packing and encrypting backup to {self.backup.path}...")
-            cmd = f'tar -pigz -cO "{self.backup.path}" | gpg2 -er "{self.encryption_key}" --always-trust > "{package}" && rm -rf "{self.backup.path}"'
-            success_msg = f"Backup successfully packed and encrypted to {self.backup.path}"
+            new_path = f"{backup.path}.tar.gz.gpg"
+            log.info(f"Packing and encrypting backup to '{new_path}'...")
+            cmd = f'tar -g "{backup.incremental_file}" -piz -cO "{backup.path}" | gpg2 -er "{self.encryption_key}" --always-trust > "{new_path}" && rm -rf "{backup.path}"'
+            success_msg = f"Backup successfully packed and encrypted to '{new_path}'"
         else:
-            log.debug(f"Backup {self.backup.path} preserved in raw format")
-            return self.backup
+            log.debug(f"Backup '{backup.path}' preserved in raw format")
+            return Backup(backup.path)
         
+        log.debug(f"Packing backup with cmd: {cmd}")
         result = Cmd.run(cmd)
-        
+
         if result.failed:
-            self.backup.remove()
+            backup.remove()
             raise TargetException(f"Packing backup failed: [{result.code}] {result.output}")
         else:
             log.info(success_msg)
-            self.backup = Backup(package)
-            return self.backup        
+            return Backup(new_path)       
                 
     def __str__(self) -> str:
         return self.name
@@ -340,56 +368,43 @@ class PullTarget(Target):
         send_magic_packet(self.mac_address)
         log.debug(f'WOL packet sent to {self.mac_address}')
         
-    def validate_connection(self) -> None:
-        sample_src = self.sources[0]
-        
-        if sample_src.startswith('rsync://'):  # Check if source match to remote location pattern
-            try:
-                host = re.match(r'rsync:\/\/.*@([a-zA-Z_\-0-9]*|\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})\/', sample_src).group(1)
-            except AttributeError:
-                raise TargetException(f"Cannot indicate host address or host name from '{sample_src}' source, cannot check if host is listening on tcp:873")
-            s = socket.socket()
-            s.settimeout(self.timeout)
-            
-            error = None
-            try:
-                s.connect((host, 873))  # Default rsync tcp port
-            except socket.error as e:
-                error = e
-            finally:
-                s.close()
-                if error:
-                    raise TargetException(f"Failed connection to '{host}' in {self.timeout} seconds: {error}")
-        else:
-            log.debug(f'Target source does not match to remote location pattern')
-            
     def create_backup(self) -> Backup:
-        backup = Backup(os.path.join(self.dest, Backup.get_today_backup_name()))
-        os.makedirs(backup.path, exist_ok=True)
+        new_backup_path = os.path.join(self.dest, Backup.get_today_backup_name())
         
         base_cmd = 'rsync -alt'
         if self.exclude:
             exclude_args = ' '.join(f'--exclude "{exclude_arg}"' for exclude_arg in self.exclude)
             base_cmd = f'{base_cmd} {exclude_args}'
         source_args = ' '.join(directory for directory in self.sources)
-        cmd = f'{base_cmd} --contimeout=5 --password-file="{self.password_file}" {source_args} {backup.path}'
-        self.backup = backup
+        cmd = f'{base_cmd} --contimeout=60 --password-file="{self.password_file}" {source_args} {new_backup_path}'
+
+        os.makedirs(new_backup_path, exist_ok=True)
         log.debug(f"Pulling backup using rsync with command: {cmd}")
         result = Cmd.run(cmd)
-        
+
         if result.code == 24:
             log.warning(f"Some files vanished in source during syncing: [{result.code}] {result.output}")
         elif result.failed:
-            self.backup.remove()
+            shutil.rmtree(new_backup_path)
             raise TargetException(f"Syncing files from source using rsync failed: [{result.code}] {result.output}")
-
-        super().create_backup()
+        log.info(f"Backup saved in '{new_backup_path}'")
+        
+        self.backup = super().create_backup(new_backup_path)
+        log.info(f"Backup finished succesfully, size: {self.backup.display_size}")
         
 
 class PushTarget(Target):
     def __init__(self, name, base_dest, conf, default_conf) -> None:
         super().__init__(name, base_dest, conf, default_conf)
         self.set_required_params(conf, default_conf, ['check_date'])
+        
+    def create_backup(self) -> Backup:
+        new_backup_path = os.path.join(self.dest, Backup.get_today_backup_name())
+        latest_backup = self.get_latest_backup()
+        log.info(f"Found latest backup in '{latest_backup}'")
+        # TODO find potential new backup in workdir, if found - nice, if not - raise alarm, at the end run super().create_backup() to create backup/encrypt or do nothing
+        self.backup = super().create_backup(new_backup_path)
+        log.info(f"Backup finished succesfully, size: {self.backup.display_size}")
 
 def parse_args():
     parser = argparse.ArgumentParser(description='Backup script')
@@ -441,7 +456,6 @@ def set_log_config(log_file, verbose_level) -> None:
     old_factory = log.getLogRecordFactory()
     log.setLogRecordFactory(record_factory)
 
-
 if __name__ == "__main__":
     args = parse_args()
     
@@ -467,22 +481,15 @@ if __name__ == "__main__":
                 raise TargetException(f'Target not defined in "{DEFAULTS["CONFIG_FILE"]}"')
             log.info('Start processing target')
             
-            if type(target) == PullTarget:
-                #target.validate_connection()
-                if target.wake_on_lan:
-                    target.send_wol_packet()
+            if type(target) == PullTarget and target.wake_on_lan:
+                target.send_wol_packet()
                     
             if target.backup_count >= target.max:
                 oldest_backup = target.get_oldest_backup()
                 log.info(f"Max ({target.max}) number of backups exceeded, oldest backup '{oldest_backup}' will be deleted")
                 oldest_backup.remove()
             
-            new_backup = target.create_backup()
-            
-            print(target)
-            print(target.backup_count)
-            #target.dump_conf()
-        
+            target.create_backup()
             state.set_target_status(target.name, f'[{target}] {target.backup.path} ({target.backup.display_size})', NAGIOS['OK'])
             print(f'OK: [{target}] {target.backup.path} ({target.backup.display_size})')
         except TargetException as error:
@@ -492,3 +499,4 @@ if __name__ == "__main__":
 
     state.remove_undefined_targets(list(conf["targets"]))
     #nsca.send_report_to_nagios(NAGIOS[state.get_status()], state.get_summary())
+    # TODO - influx client
