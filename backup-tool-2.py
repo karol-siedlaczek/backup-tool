@@ -7,7 +7,6 @@ import yaml
 import json
 import math
 import shutil
-import socket
 import argparse
 from glob import glob
 from datetime import datetime
@@ -25,7 +24,7 @@ import logging as log
 # apt install gnupg2 tar rsync
 # pip3 install wakeonlan
 # c - create, g - list for incremental, p - preserve permissions, 
-# z - compress to gzip, f - file to backup, i - ignore zero-blocks, O - extract fiels to stdio
+# z - compress to gzip, f - file to backup, i - ignore zero-blocks, O - extract fields to stdio
 
 DEFAULTS = {
     'LOG_LEVEL': 1,
@@ -48,6 +47,8 @@ NAGIOS = {
 class TargetException(Exception):
     pass
 
+class TargetSkipException(Exception):
+    pass
 
 class Cmd():
     def __init__(self, output, code) -> None:
@@ -158,6 +159,10 @@ class Backup():
         return bool(re.match(regex, self.package))
        
     @property
+    def display_date(self) -> str:
+        return self.date.strftime(Backup.DATE_FORMAT)
+    
+    @property
     def display_size(self) -> str:
         if self.size == 0:
             return '0B'
@@ -188,12 +193,12 @@ class Backup():
             return self.manifest_file
         else:
             try:
-                return glob(f'{self.directory}/manifests/manifest-{self.date.strftime(Backup.DATE_FORMAT)}*')[0]
+                return glob(f'{self.directory}/manifests/manifest-{self.display_date}*')[0]
             except IndexError:
                 return None
     
     def create_manifest_file(self, format, encryption_key=None) -> None:
-        manifest_file = os.path.join(self.directory, 'manifests', f'manifest-{self.date.strftime(Backup.DATE_FORMAT)}.txt')
+        manifest_file = os.path.join(self.directory, 'manifests', f'manifest-{self.display_date}.txt')
         os.makedirs(os.path.join(self.directory, 'manifests'), exist_ok=True)
         result = Cmd.run(f'find "{self.path}" -printf "%AF %AT\t%s\t%p\n" > "{manifest_file}"')
         encrypting_failed = False
@@ -317,8 +322,10 @@ class Target():
         except FileNotFoundError:
             return None
         
-    def create_backup(self, new_backup_path) -> Backup:
-        backup = Backup(new_backup_path)
+    def create_backup(self, source_path, dest_path) -> Backup:
+        #if not dest_path:
+        #    dest_path = source_path  # * If backup is already in correct directory (pull targets), source backup from push targets are always in work_dir
+        backup = Backup(dest_path)
         
         try:
             backup.create_manifest_file(self.format, self.encryption_key)
@@ -327,18 +334,22 @@ class Target():
             raise TargetException(error)
         
         if self.format == DEFAULTS['FORMATS']['PACKAGE']:
-            new_path = f"{backup.path}.tar.gz"
+            new_path = f"{dest_path}.tar.gz"
             log.info(f"Packing backup to '{new_path}'...")
-            cmd = f'tar -g "{backup.incremental_file}" -piz -cf "{new_path}" "{backup.path}" && rm -rf "{backup.path}"'
-            success_msg = f"Backup successfully packed to '{new_path}'"
+            cmd = f'tar -g "{backup.incremental_file}" -piz -cf "{new_path}" "{source_path}" && rm -rf "{source_path}"'
+            success_msg = f"Backup successfully packed to '{new_path}' path"
         elif self.format == DEFAULTS['FORMATS']['ENCRYPTED_PACKAGE']:
-            new_path = f"{backup.path}.tar.gz.gpg"
+            new_path = f"{dest_path}.tar.gz.gpg"
             log.info(f"Packing and encrypting backup to '{new_path}'...")
-            cmd = f'tar -g "{backup.incremental_file}" -piz -cO "{backup.path}" | gpg2 -er "{self.encryption_key}" --always-trust > "{new_path}" && rm -rf "{backup.path}"'
-            success_msg = f"Backup successfully packed and encrypted to '{new_path}'"
-        else:
-            log.debug(f"Backup '{backup.path}' preserved in raw format")
-            return Backup(backup.path)
+            cmd = f'tar -g "{backup.incremental_file}" -piz -cO "{source_path}" | gpg2 -er "{self.encryption_key}" --always-trust > "{new_path}" && rm -rf "{source_path}"'
+            success_msg = f"Backup successfully packed and encrypted to '{new_path}' path"
+        else: # TODO move !!!
+            log.debug(f"Backup '{dest_path}' preserved in raw format")
+            # if source_path != dest_path:
+            #     log.info(f"Moving backup from '{source_path}' source path to '{dest_path}' dest path")
+            #     shutil.move(source_path, dest_path)
+            #     log.info(f"Backup moved from '{source_path}' path to '{dest_path}' path")
+            return Backup(dest_path)
         
         log.debug(f"Packing backup with cmd: {cmd}")
         result = Cmd.run(cmd)
@@ -390,21 +401,58 @@ class PullTarget(Target):
         log.info(f"Backup saved in '{new_backup_path}'")
         
         self.backup = super().create_backup(new_backup_path)
-        log.info(f"Backup finished succesfully, size: {self.backup.display_size}")
+        log.info(f"Backup finished successfully, size: {self.backup.display_size}")
         
 
 class PushTarget(Target):
-    def __init__(self, name, base_dest, conf, default_conf) -> None:
+    def __init__(self, name, base_dest, work_dir, conf, default_conf) -> None:
         super().__init__(name, base_dest, conf, default_conf)
-        self.set_required_params(conf, default_conf, ['check_date'])
+        self.work_dir = os.path.join(work_dir, self.name)
+        self.__set_frequency(conf['frequency'] if conf.get('frequency') else default_conf.get('frequency'))
+            
+    def __set_frequency(self, frequency) -> None:
+        regex = r'([\d]{1,4})([d|m|w]{1})'
+        match = re.fullmatch(regex, frequency) # Param examples: 1d = 1 day, 3w = 3 weeks, 2m = 2 months
         
+        if match:
+            number, date_attr = match.groups()
+            if date_attr == 'd':
+                self.frequency = int(number)
+            elif date_attr == 'w':
+                self.frequency = int(number) * 7
+            elif date_attr == 'm':
+                self.frequency = int(number) * 30
+        else:
+            raise TargetException(f"Parameter 'frequency' is not valid with value '{frequency}', should match to '{regex}' pattern (d=day/s, w=week/s, m=month/s)")
+      
     def create_backup(self) -> Backup:
-        new_backup_path = os.path.join(self.dest, Backup.get_today_backup_name())
+        print(self.dump_conf())
         latest_backup = self.get_latest_backup()
-        log.info(f"Found latest backup in '{latest_backup}'")
-        # TODO find potential new backup in workdir, if found - nice, if not - raise alarm, at the end run super().create_backup() to create backup/encrypt or do nothing
-        self.backup = super().create_backup(new_backup_path)
-        log.info(f"Backup finished succesfully, size: {self.backup.display_size}")
+        
+        try:
+            days_ago = (datetime.now() - latest_backup.date).days
+        except AttributeError:  # * There is no backup yet for this target
+            pass
+        finally:
+            os.makedirs(self.work_dir, exist_ok=True)
+            files_in_workdir = os.listdir(self.work_dir)
+            backup_should_be_created = not latest_backup or days_ago >= self.frequency
+            
+            if backup_should_be_created and files_in_workdir:  # jesli nie masz backupu albo wybila godzina zrobienia backupu i są jakies pliki to rób
+                new_backup_path = os.path.join(self.dest, Backup.get_today_backup_name())
+                os.makedirs(new_backup_path, exist_ok=True)
+                
+                log.info(f"Moving files from '{self.work_dir}' working directory to '{new_backup_path}' path...")
+                Cmd.run(f'mv "{self.work_dir}/*" {new_backup_path}')
+                log.info(f"Files moved from '{self.work_dir}' working directory to '{new_backup_path}' path")
+                # TODO - clear workdir
+                self.backup = super().create_backup(new_backup_path)
+                log.info(f"Backup finished successfully, size: {self.backup.display_size}")
+            elif not files_in_workdir:  # FIXME - condition is not correct - jesli nie ma plikow to krzycz glosno (ale po co jesli nie wybila godzina?)
+                raise TargetException(f"Not found any file to process in '{self.work_dir}' work directory")
+            else:  # TODO raise warning when backup should not be created (because frequency) but there are some files in buffer
+                raise TargetSkipException(f"Found latest backup from '{latest_backup.display_date}' created {days_ago} days ago, frequency is {self.frequency} days, backup creation skipped")
+
 
 def parse_args():
     parser = argparse.ArgumentParser(description='Backup script')
@@ -467,6 +515,7 @@ if __name__ == "__main__":
     set_log_config(common_conf.get('log_file'), args.verbose)
     nsca = Nsca(common_conf.get('nagios_host'), common_conf.get('nagios_service'), common_conf.get('nsca_host'), common_conf.get('nsca_port'))
     state = State(common_conf.get('state_file'))
+    influx_output = ''
     
     for target in args.targets:
         try:
@@ -474,7 +523,7 @@ if __name__ == "__main__":
             
             if target_conf:
                 if target_conf.get('type') == 'push':
-                    target = PushTarget(target, common_conf.get('base_dest'), target_conf, conf.get('default'))
+                    target = PushTarget(target, common_conf.get('base_dest'), common_conf.get('work_dir'),target_conf, conf.get('default'))
                 else:
                     target = PullTarget(target, common_conf.get('base_dest'), target_conf, conf.get('default'))
             else:
@@ -492,10 +541,14 @@ if __name__ == "__main__":
             target.create_backup()
             state.set_target_status(target.name, f'[{target}] {target.backup.path} ({target.backup.display_size})', NAGIOS['OK'])
             print(f'OK: [{target}] {target.backup.path} ({target.backup.display_size})')
+            # influx_output += 'backup_status'
         except TargetException as error:
             log.error(error)
             print(f'[{target}] {os.path.basename(__file__)}: {error}')
             state.set_target_status(target, error, NAGIOS['CRITICAL'])
+        except TargetSkipException as info:
+            log.info(info)
+            state.set_target_status(target, info, NAGIOS['OK'])
 
     state.remove_undefined_targets(list(conf["targets"]))
     #nsca.send_report_to_nagios(NAGIOS[state.get_status()], state.get_summary())
