@@ -8,6 +8,7 @@ import json
 import math
 import shutil
 import argparse
+from inspect import isclass
 from glob import glob
 from datetime import datetime
 from wakeonlan import send_magic_packet
@@ -34,6 +35,10 @@ DEFAULTS = {
         'PACKAGE': 'package',
         'ENCRYPTED_PACKAGE': 'encrypted_package',
         'RAW': 'raw'
+    },
+    'BACKUP_TYPES': {
+        'PUSH': 'push',
+        'PULL': 'pull'
     }
 }
 
@@ -45,10 +50,23 @@ NAGIOS = {
 }
 
 class TargetException(Exception):
-    pass
+    def __init__(self, code) -> None:
+        self.code = code
 
-class TargetSkipException(Exception):
-    pass
+class TargetError(TargetException):
+    def __init__(self, msg) -> None:
+        super().__init__(NAGIOS['CRITICAL'])
+        log.error(msg)
+
+class TargetWarning(TargetException):
+    def __init__(self, msg) -> None:
+        super().__init__(NAGIOS['WARNING'])
+        log.warning(msg)
+
+class TargetSkipException(TargetException):
+    def __init__(self, msg) -> None:
+        super().__init__(NAGIOS['OK'])
+        log.info(msg)
 
 class Cmd():
     def __init__(self, output, code) -> None:
@@ -73,9 +91,9 @@ class Nsca():
     
     def send_report_to_nagios(self, code, msg) -> None:
         cmd = f"echo -e '{self.nagios_host}\t{self.nagios_service}\t{code}\t{msg}' | {self.bin} -H {self.host} -p {self.port}"
-        output, exit_code = run_cmd(cmd)
-        if exit_code > 0:
-            raise ConnectionError(f"Sending nsca packet to {self.host}:{self.port} failed: {output}")
+        result = Cmd.run(cmd)
+        if result.failed:
+            raise ConnectionError(f"Sending nsca packet to {self.host}:{self.port} failed: {result.output}")
         
     @staticmethod
     def get_status_by_code(code) -> str:
@@ -109,7 +127,7 @@ class State():
         }
         with open(self.state_file, 'w') as f:
             yaml.safe_dump(self.state, f)
-        log.info(f"State change from {old_state} state to {self.state[str(target_name)]['status']}")
+        log.info(f"State change from {old_state} state to {self.state[str(target_name)]['status']} state")
         
     def remove_undefined_targets(self, defined_targets) -> None:
         targets_in_state_file = list(self.state.keys())
@@ -186,7 +204,7 @@ class Backup():
                     os.remove(file_to_delete)
             log.info(f"Backup '{self}' deleted [{self.display_size}]")
         except PermissionError as error:
-            raise TargetException(f"Cannot delete backup '{self}', reason: {error}")
+            raise TargetError(f"Cannot delete backup '{self}', reason: {error}")
     
     def __get_manifest_file(self) -> str:
         if self.manifest_file:
@@ -205,7 +223,7 @@ class Backup():
         packed_manifest_file = None
 
         if result.failed:
-            raise TargetException(f"Getting content to manifest file from '{self.path}' failed: [{result.code}] {result.output}")
+            raise TargetError(f"Getting content to manifest file from '{self.path}' failed: [{result.code}] {result.output}")
         
         if format == DEFAULTS['FORMATS']['ENCRYPTED_PACKAGE']:
             packed_manifest_file = manifest_file.replace('.txt', '.tar.gz.gpg')
@@ -219,12 +237,12 @@ class Backup():
             result = Cmd.run(f'tar czf "{packed_manifest_file}" "{manifest_file}" && rm -rf "{manifest_file}"')    
         
         if result and result.failed:
-            raise TargetException(f"Creating manifest file to '{manifest_file}' failed: [{result.code}] {result.output}")
+            raise TargetError(f"Creating manifest file to '{manifest_file}' failed: [{result.code}] {result.output}")
         self.manifest_file = packed_manifest_file if packed_manifest_file else manifest_file
         log.info(f"Manifest file created in '{self.manifest_file}'")
 
     @staticmethod
-    def get_today_backup_name() -> str:
+    def get_today_package_name() -> str:
         return f'backup-{datetime.now().strftime(Backup.DATE_FORMAT)}'
     
     @staticmethod
@@ -242,46 +260,167 @@ class Backup():
         return self.path
     
 
+class TargetValidator():
+    @staticmethod
+    def validate_required_param(param, value) -> None:
+        if not value:
+            raise TargetError(f"Parameter '{param}' is required")
+        
+    @staticmethod
+    def validate_match(param, regex, value, custom_msg=None):
+        match = re.fullmatch(regex, value)
+        if not match:
+            raise TargetError(f"""Parameter '{param}' with '{value}' value {str(custom_msg) if custom_msg else f"does not match to '{regex}' pattern"}""")
+        return match
+
+    @staticmethod
+    def validate_type(param, class_type, value, custom_msg=None) -> None:
+        if not isclass(class_type):
+            raise AttributeError(f"Type '{class_type}' is not class")
+        elif not isinstance(class_type, value):
+            raise TargetError(f"Parameter '{param}' with '{value}' value {str(custom_msg) if custom_msg else f'is not valid {class_type} type'}")
+        
+    @staticmethod
+    def validate_dir_path(param, dir_path):
+        regex = r'^((/[a-zA-Z0-9-_]+)+|/)$'
+        match = re.fullmatch(regex, dir_path)
+        if not match:
+            raise TargetError(f"Parameter '{param}' with '{dir_path}' path is not valid path to directory")
+        return match
+    
+    @staticmethod 
+    def validate_file_exist(param, file_path) -> None:
+        if not os.path.exists(file_path):
+            raise TargetError(f"Parameter '{param}' with '{file_path}' path points to file which does not exist")
+    
+    @staticmethod
+    def validate_allowed_values(param, value, allowed_values) -> None:
+        if value not in allowed_values:
+            raise TargetError(f"Parameter '{param}' has invalid '{value}' value, possible choices: {allowed_values}")
+
+    
 class Target():
     def __init__(self, name, base_dest, conf, default_conf) -> None:
         self.name = name
         self.backup = None
-        self.encryption_key = None
-        self.dest = os.path.join(base_dest, conf['dest']) if conf.get('dest') else os.path.join(base_dest, self.name)
-        required_conf_params = ['format', 'owner', 'password_file', 'permissions', 'max', 'type']
-        self.set_required_params(conf, default_conf, required_conf_params)
+        self.type = conf.get('type')
+        self.dest = os.path.join(base_dest, conf.get('dest')) or os.path.join(base_dest, self.name)
+        max_size = conf.get('max_size') or default_conf.get('max_size')
+        max_num = conf.get('max_num') or default_conf.get('max_num')
         
-        if self.format not in DEFAULTS['FORMATS'].values():
-            raise TargetException(f"Target has unknown backup format ({self.format}), possible choices: {DEFAULTS['FORMATS'].values()}")
-        elif self.format == DEFAULTS['FORMATS']['ENCRYPTED_PACKAGE']:
-            if conf.get('encryption_key'):
-                self.encryption_key = conf['encryption_key']
-            elif default_conf.get('encryption_key'):
-                self.encryption_key = default_conf['encryption_key']
-            else:
-                raise TargetException("To encrypt backup package parameter 'encryption_key' need to be defined")
-                
-    def set_required_params(self, conf, default_conf, params) -> None:
-        for param in params:
-            value = conf.get(param)
-            if value:
-                setattr(self, param, value)
-            else:
-                default_value = default_conf.get(param)
-                if default_value:
-                    setattr(self, param, default_value)
-                else:
-                    raise TargetException(f"Required parameter '{param}' is not defined")
-    
-    def dump_conf(self) -> None:
-        attrs = vars(self)
-        print(f'{self}:\n{json.dumps(attrs, indent=2)}\n')
-        
-    @property
-    def backup_count(self) -> int:
-        try:
-            count = 0
+        if max_size and max_num:
+            log.warning("Parameter 'max_size' and 'max_num' are mutually exclusive, max_num will be overwritten by max_size")
+            self.max_size = max_size
+        elif not max_size and not max_num:
+            raise TargetException("Target must have defined any parameter to declare limitations, by size choose parameter 'max_size' with value <digit><B|KB|MB|GB|TB>, by count select 'max_num' with value <digit>")
+        elif max_size:
+            self.max_size = max_size
+        else:
+            self.max_num = max_num
             
+        self.format = conf.get('format') or default_conf.get('format')
+        self.owner = conf.get('owner') or default_conf.get('owner')
+        self.permissions = conf.get('permissions') or default_conf.get('permissions')
+        if self.format == DEFAULTS['FORMATS']['ENCRYPTED_PACKAGE']:
+            self.encryption_key = conf.get('encryption_key') or default_conf.get('encryption_key')
+    
+    @property
+    def type(self) -> str:
+        return self._type
+    
+    @property
+    def dest(self) -> str:
+        return self._dest
+    
+    @property
+    def max_size(self) -> int:
+        return self.max_size
+    
+    @property
+    def max_num(self) -> int:
+        return self._max_num
+    
+    @property
+    def format(self) -> str:
+        return self._format
+    
+    @property
+    def owner(self) -> str:
+        return self._owner
+    
+    @property
+    def permissions(self) -> str:
+        return self._permissions
+    
+    @property
+    def encryption_key(self) -> str:
+        return self._encryption_key
+    
+    @type.setter
+    def type(self, value) -> str:
+        TargetValidator.validate_required_param('type', value)
+        TargetValidator.validate_allowed_values('type', value, DEFAULTS['BACKUP_TYPES'].values())
+        self._type = value
+        
+    @dest.setter
+    def dest(self, value) -> str:
+        TargetValidator.validate_required_param('dest', value)
+        TargetValidator.validate_dir_path('dest', value)
+        self._dest = value
+    
+    @max_size.setter
+    def max_size(self, value) -> int:
+        if value:
+            match = TargetValidator.validate_match('max_size', r'^([1-9]{1}[\d]*)\s?(B|KB|MB|GB|TB)$', value)
+            size, unit = match.groups()
+            
+            if unit == 'B':
+                self._max_size = int(size)
+            elif unit == 'KB':
+                self._max_size = int(size) * 1024
+            elif unit == 'MB':
+                self._max_size = int(size) * 1024 * 1024
+            elif unit == 'GB':
+                self._max_size = int(size) * 1024 * 1024 * 1024
+            elif unit == 'TB':
+                self._max_size = int(size) * 1024 * 1024 * 1024 * 1024
+        else:
+            self._max_size = None
+    
+    @max_num.setter
+    def max_number(self, value) -> int:
+        return self._max_num
+    
+    @format.setter
+    def format(self, value) -> str:
+        TargetValidator.validate_required_param('format', value)
+        TargetValidator.validate_allowed_values('format', value, DEFAULTS['FORMATS'].values())
+        self._format = value
+    
+    @owner.setter
+    def owner(self, value) -> str:
+        TargetValidator.validate_required_param('owner', value)
+        TargetValidator.validate_type('owner', str, value)
+        self._owner = value
+    
+    @permissions.setter
+    def permissions(self, value) -> str:
+        TargetValidator.validate_required_param('permissions', value)
+        TargetValidator.validate_match('permissions', r'^[0-7]{3,4}$', value)
+        self._permissions = value
+    
+    @encryption_key.setter
+    def encryption_key(self, value) -> str:
+        TargetValidator.validate_required_param('encryption_key', value)
+        TargetValidator.validate_type('encryption_key', str, value)
+        self._encryption_key = value
+    
+    def get_conf(self) -> dict[str, str]:  # TODO add comment to dump when variable is taken from default params
+        return vars(self)
+
+    def get_backup_count(self) -> int:
+        count = 0
+        try:
             for backup_package in os.listdir(self.dest):
                 try:
                     Backup(os.path.join(self.dest, backup_package))
@@ -293,9 +432,8 @@ class Target():
             return 0
     
     def get_oldest_backup(self) -> Backup | None:
+        oldest_backup = None
         try:
-            oldest_backup = None
-            
             for backup_package in os.listdir(self.dest):
                 try:
                     backup = Backup(os.path.join(self.dest, backup_package))
@@ -308,9 +446,8 @@ class Target():
             return None
     
     def get_latest_backup(self) -> Backup | None:
+        latest_backup = None
         try:
-            latest_backup = None
-            
             for backup_package in os.listdir(self.dest):
                 try:
                     backup = Backup(os.path.join(self.dest, backup_package))
@@ -322,44 +459,38 @@ class Target():
         except FileNotFoundError:
             return None
         
-    def create_backup(self, source_path, dest_path) -> Backup:
-        #if not dest_path:
-        #    dest_path = source_path  # * If backup is already in correct directory (pull targets), source backup from push targets are always in work_dir
-        backup = Backup(dest_path)
+    def create_backup(self, path) -> Backup:
+        backup = Backup(path)
         
         try:
             backup.create_manifest_file(self.format, self.encryption_key)
-        except TargetException as error:
+        except TargetError as error:
             backup.remove()
-            raise TargetException(error)
+            raise TargetError(error)
         
         if self.format == DEFAULTS['FORMATS']['PACKAGE']:
-            new_path = f"{dest_path}.tar.gz"
+            new_path = f"{path}.tar.gz"
             log.info(f"Packing backup to '{new_path}'...")
-            cmd = f'tar -g "{backup.incremental_file}" -piz -cf "{new_path}" "{source_path}" && rm -rf "{source_path}"'
+            cmd = f'tar -g "{backup.incremental_file}" -piz -cf "{new_path}" "{path}" && rm -rf "{path}"'
             success_msg = f"Backup successfully packed to '{new_path}' path"
         elif self.format == DEFAULTS['FORMATS']['ENCRYPTED_PACKAGE']:
-            new_path = f"{dest_path}.tar.gz.gpg"
+            new_path = f"{path}.tar.gz.gpg"
             log.info(f"Packing and encrypting backup to '{new_path}'...")
-            cmd = f'tar -g "{backup.incremental_file}" -piz -cO "{source_path}" | gpg2 -er "{self.encryption_key}" --always-trust > "{new_path}" && rm -rf "{source_path}"'
+            cmd = f'tar -g "{backup.incremental_file}" -piz -cO "{path}" | gpg2 -er "{self.encryption_key}" --always-trust > "{new_path}" && rm -rf "{path}"'
             success_msg = f"Backup successfully packed and encrypted to '{new_path}' path"
-        else: # TODO move !!!
-            log.debug(f"Backup '{dest_path}' preserved in raw format")
-            # if source_path != dest_path:
-            #     log.info(f"Moving backup from '{source_path}' source path to '{dest_path}' dest path")
-            #     shutil.move(source_path, dest_path)
-            #     log.info(f"Backup moved from '{source_path}' path to '{dest_path}' path")
-            return Backup(dest_path)
+        else:
+            log.debug(f"Backup '{path}' preserved in raw format")
+            return Backup(path)
         
         log.debug(f"Packing backup with cmd: {cmd}")
         result = Cmd.run(cmd)
 
         if result.failed:
             backup.remove()
-            raise TargetException(f"Packing backup failed: [{result.code}] {result.output}")
+            raise TargetError(f"Packing backup failed: [{result.code}] {result.output}")
         else:
             log.info(success_msg)
-            return Backup(new_path)       
+            return Backup(new_path)
                 
     def __str__(self) -> str:
         return self.name
@@ -368,19 +499,69 @@ class Target():
 class PullTarget(Target):
     def __init__(self, name, base_dest, conf, default_conf) -> None:
         super().__init__(name, base_dest, conf, default_conf)
-        self.set_required_params(conf, default_conf, ['sources', 'timeout', 'password_file'])
+        self.sources = conf.get('sources') or default_conf.get('sources')
+        self.timeout = conf.get('sources') or default_conf.get('sources')
+        self.password_file = conf.get('password_file') or default_conf.get('password_file')
+        self.exclude = conf.get('exclude') or default_conf.get('exclude')
         self.wake_on_lan = bool(conf.get('wake_on_lan'))
         
         if self.wake_on_lan:
             self.mac_address = conf.get('wake_on_lan').get('mac_address')
-        self.exclude = conf['exclude'] if conf.get('exclude') else default_conf.get('exclude')
     
-    def send_wol_packet(self) -> None:
-        send_magic_packet(self.mac_address)
-        log.debug(f'WOL packet sent to {self.mac_address}')
+    @property
+    def sources(self) -> list:
+        return self._sources
+    
+    @property
+    def timeout(self) -> int:
+        return self._timeout
+    
+    @property
+    def password_file(self) -> str:
+        return self._password_file
+    
+    @property
+    def exclude(self) -> list:
+        return self._exclude
+    
+    @property
+    def mac_address(self) -> str:
+        return self._mac_address
+    
+    @sources.setter
+    def sources(self, value) -> None:
+        TargetValidator.validate_required_param('sources', value)
+        TargetValidator.validate_type('sources', list, value)
+        self._sources = value
+    
+    @timeout.setter
+    def timeout(self, value) -> None:
+        TargetValidator.validate_required_param('timeout', value)
+        TargetValidator.validate_type('timeout', int, value)
+        self._timeout = value
+    
+    @password_file.setter
+    def password_file(self, value) -> None:
+        TargetValidator.validate_required_param('password_file', value)
+        TargetValidator.validate_file_exist('password_file', value)
+        self._password_file = value
+    
+    @exclude.setter
+    def exclude(self, value) -> None:
+        if value:
+            TargetValidator.validate_type('exclude', list, value)
+            self._exclude = value
+        else:
+            self._exclude = None
+    
+    @mac_address.setter
+    def mac_address(self, value) -> None:
+        TargetException.validate_required_param('mac_address', value)  # Only required when wake_on_lan is True
+        TargetException.validate_match('mac_address', r'^([0-9A-Fa-f]{2}[:-]){5}([0-9A-Fa-f]{2})$', value, 'is not valid MAC address')
+        self._mac_address = value
         
     def create_backup(self) -> Backup:
-        new_backup_path = os.path.join(self.dest, Backup.get_today_backup_name())
+        new_backup_path = os.path.join(self.dest, Backup.get_today_package_name())
         
         base_cmd = 'rsync -alt'
         if self.exclude:
@@ -397,36 +578,50 @@ class PullTarget(Target):
             log.warning(f"Some files vanished in source during syncing: [{result.code}] {result.output}")
         elif result.failed:
             shutil.rmtree(new_backup_path)
-            raise TargetException(f"Syncing files from source using rsync failed: [{result.code}] {result.output}")
+            raise TargetError(f"Syncing files from source using rsync failed: [{result.code}] {result.output}")
         log.info(f"Backup saved in '{new_backup_path}'")
         
         self.backup = super().create_backup(new_backup_path)
         log.info(f"Backup finished successfully, size: {self.backup.display_size}")
+    
+    def send_wol_packet(self) -> None:
+        send_magic_packet(self.mac_address)
+        log.debug(f'WOL packet sent to {self.mac_address}')
         
 
 class PushTarget(Target):
     def __init__(self, name, base_dest, work_dir, conf, default_conf) -> None:
         super().__init__(name, base_dest, conf, default_conf)
         self.work_dir = os.path.join(work_dir, self.name)
-        self.__set_frequency(conf['frequency'] if conf.get('frequency') else default_conf.get('frequency'))
-            
-    def __set_frequency(self, frequency) -> None:
-        regex = r'([\d]{1,4})([d|m|w]{1})'
-        match = re.fullmatch(regex, frequency) # Param examples: 1d = 1 day, 3w = 3 weeks, 2m = 2 months
+        self.frequency = conf.get('frequency') or default_conf.get('frequency')
+    
+    @property
+    def work_dir(self) -> str:
+        return self._work_dir
+    
+    @property
+    def frequency(self) -> int:
+        return self._frequency
+    
+    @work_dir.setter
+    def work_dir(self, value) -> None:
+        TargetValidator.validate_required_param('work_dir', value)
+        TargetValidator.validate_dir_path('work_dir', value)
+        self._work_dir = value
         
-        if match:
-            number, date_attr = match.groups()
-            if date_attr == 'd':
-                self.frequency = int(number)
-            elif date_attr == 'w':
-                self.frequency = int(number) * 7
-            elif date_attr == 'm':
-                self.frequency = int(number) * 30
-        else:
-            raise TargetException(f"Parameter 'frequency' is not valid with value '{frequency}', should match to '{regex}' pattern (d=day/s, w=week/s, m=month/s)")
+    @frequency.setter
+    def frequency(self, value) -> None:  # * Param examples: 1d = 1 day, 3w = 3 weeks, 2m = 2 months
+        TargetValidator.validate_required_param('frequency', value)
+        match = TargetValidator.validate_match('frequency', r'^([\d]{1,4})\s?([d|m|w]{1})$', value)
+        number, date_attr = match.groups()
+        if date_attr == 'd':
+            self._frequency = int(number)
+        elif date_attr == 'w':
+            self._frequency = int(number) * 7
+        elif date_attr == 'm':
+            self._frequency = int(number) * 30
       
     def create_backup(self) -> Backup:
-        print(self.dump_conf())
         latest_backup = self.get_latest_backup()
         
         try:
@@ -436,26 +631,33 @@ class PushTarget(Target):
         finally:
             os.makedirs(self.work_dir, exist_ok=True)
             files_in_workdir = os.listdir(self.work_dir)
-            backup_should_be_created = not latest_backup or days_ago >= self.frequency
             
-            if backup_should_be_created and files_in_workdir:  # jesli nie masz backupu albo wybila godzina zrobienia backupu i są jakies pliki to rób
-                new_backup_path = os.path.join(self.dest, Backup.get_today_backup_name())
-                os.makedirs(new_backup_path, exist_ok=True)
-                
-                log.info(f"Moving files from '{self.work_dir}' working directory to '{new_backup_path}' path...")
-                Cmd.run(f'mv "{self.work_dir}/*" {new_backup_path}')
-                log.info(f"Files moved from '{self.work_dir}' working directory to '{new_backup_path}' path")
-                # TODO - clear workdir
-                self.backup = super().create_backup(new_backup_path)
-                log.info(f"Backup finished successfully, size: {self.backup.display_size}")
-            elif not files_in_workdir:  # FIXME - condition is not correct - jesli nie ma plikow to krzycz glosno (ale po co jesli nie wybila godzina?)
-                raise TargetException(f"Not found any file to process in '{self.work_dir}' work directory")
-            else:  # TODO raise warning when backup should not be created (because frequency) but there are some files in buffer
+            if not latest_backup or days_ago >= self.frequency:  # * There is no backup or correct number of days passed since last backup
+                if files_in_workdir:
+                    new_backup_path = os.path.join(self.dest, Backup.get_today_package_name())
+                    os.makedirs(new_backup_path, exist_ok=True)
+                    
+                    log.info(f"Moving files from '{self.work_dir}' working directory to '{new_backup_path}' path...")
+                    result = Cmd.run(f'mv {self.work_dir}/* {new_backup_path}')
+                    
+                    if result.failed:
+                        shutil.rmtree(new_backup_path)
+                        raise TargetError(f"Moving files from '{self.work_dir}' working directory to '{new_backup_path}' failed: [{result.code}] {result.output}")
+                    else:
+                        log.info(f"Files moved from '{self.work_dir}' working directory to '{new_backup_path}' path")
+                        self.backup = super().create_backup(new_backup_path)
+                        log.info(f"Backup finished successfully, size: {self.backup.display_size}")
+                else:
+                    raise TargetError(f"Not found any file to process in '{self.work_dir}' work directory")
+            elif files_in_workdir:
+                raise TargetWarning(f"Backup should not be created but found some files in '{self.work_dir}' working directory")
+            else:
                 raise TargetSkipException(f"Found latest backup from '{latest_backup.display_date}' created {days_ago} days ago, frequency is {self.frequency} days, backup creation skipped")
 
 
 def parse_args():
     parser = argparse.ArgumentParser(description='Backup script')
+    parser.add_argument('action', choices=['cleanup', 'run'])
     parser.add_argument('-v', '--verbose', 
                         action='count', 
                         default=DEFAULTS['LOG_LEVEL'],
@@ -475,7 +677,6 @@ def parse_args():
     
     return parser.parse_args()
 
-
 def validate_conf_commons(commons) -> None:
     try:
         if not commons:
@@ -484,7 +685,7 @@ def validate_conf_commons(commons) -> None:
             if not commons.get(param):
                 raise EnvironmentError(f"parameter '{param}' is missing in 'common' key")
     except EnvironmentError as error:
-        print(f"File '{DEFAULTS['CONFIG_FILE']}' is not valid config for backup-tool: {error}")
+        print(f"File '{DEFAULTS['CONFIG_FILE']}' is not valid config: {error}")
         sys.exit(NAGIOS['UNKNOWN'])
 
 
@@ -520,36 +721,35 @@ if __name__ == "__main__":
     for target in args.targets:
         try:
             target_conf = conf['targets'].get(target)
+            if not target_conf: 
+                raise TargetError(f'Target not defined in "{DEFAULTS["CONFIG_FILE"]}"')
             
-            if target_conf:
-                if target_conf.get('type') == 'push':
-                    target = PushTarget(target, common_conf.get('base_dest'), common_conf.get('work_dir'),target_conf, conf.get('default'))
-                else:
-                    target = PullTarget(target, common_conf.get('base_dest'), target_conf, conf.get('default'))
+            if target_conf.get('type') == DEFAULTS['BACKUP_TYPES']['PUSH']:
+                target = PushTarget(target, common_conf.get('base_dest'), common_conf.get('work_dir'), target_conf, conf.get('default'))
             else:
-                raise TargetException(f'Target not defined in "{DEFAULTS["CONFIG_FILE"]}"')
+                target = PullTarget(target, common_conf.get('base_dest'), target_conf, conf.get('default'))
+             
             log.info('Start processing target')
-            
-            if type(target) == PullTarget and target.wake_on_lan:
-                target.send_wol_packet()
-                    
-            if target.backup_count >= target.max:
-                oldest_backup = target.get_oldest_backup()
-                log.info(f"Max ({target.max}) number of backups exceeded, oldest backup '{oldest_backup}' will be deleted")
-                oldest_backup.remove()
-            
-            target.create_backup()
-            state.set_target_status(target.name, f'[{target}] {target.backup.path} ({target.backup.display_size})', NAGIOS['OK'])
-            print(f'OK: [{target}] {target.backup.path} ({target.backup.display_size})')
-            # influx_output += 'backup_status'
-        except TargetException as error:
-            log.error(error)
-            print(f'[{target}] {os.path.basename(__file__)}: {error}')
-            state.set_target_status(target, error, NAGIOS['CRITICAL'])
-        except TargetSkipException as info:
-            log.info(info)
-            state.set_target_status(target, info, NAGIOS['OK'])
+
+            if args.action == 'cleanup':  # TODO - add max_size and max_number of backup to measure
+                if target.get_backup_count() >= target.max:
+                    oldest_backup = target.get_oldest_backup()
+                    log.info(f"Max ({target.max}) number of backups exceeded, oldest backup '{oldest_backup}' will be deleted")
+                    oldest_backup.remove()
+            else:
+                if type(target) == PullTarget and target.wake_on_lan: 
+                    target.send_wol_packet()
+                target.create_backup()
+                msg = f'[{target}] {target.backup.path} ({target.backup.display_size})'
+                code = NAGIOS['OK']
+        except TargetException as e:
+            msg = str(e)
+            code = e.code
+        finally:
+            print(f'{Nsca.get_status_by_code(code)}: {msg}')
+            state.set_target_status(target, msg, code)
 
     state.remove_undefined_targets(list(conf["targets"]))
-    #nsca.send_report_to_nagios(NAGIOS[state.get_status()], state.get_summary())
+    #if args.report:
+    #    nsca.send_report_to_nagios(NAGIOS[state.get_status()], state.get_summary())
     # TODO - influx client
