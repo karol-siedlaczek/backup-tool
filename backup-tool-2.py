@@ -8,9 +8,10 @@ import json
 import math
 import shutil
 import argparse
+from influxdb import InfluxDBClient
 from inspect import isclass
 from glob import glob
-from datetime import datetime
+from datetime import datetime, timedelta
 from wakeonlan import send_magic_packet
 import subprocess
 import logging as log
@@ -30,7 +31,7 @@ import logging as log
 DEFAULTS = {
     'LOG_LEVEL': 1,
     'CONFIG_FILE': 'backup-tool.yaml',
-    'REQUIRED_COMMON_PARAMS': ['nsca_host', 'nsca_port', 'nagios_host', 'nagios_service', 'base_dest', 'log_file', 'hosts_file', 'state_file', 'work_dir'],
+    'REQUIRED_COMMON_PARAMS': ['nsca_host', 'nsca_port', 'nagios_host', 'nagios_service', 'base_dest', 'log_file', 'hosts_file', 'backup_state_file', 'cleanup_state_file', 'work_dir'],
     'FORMATS': {
         'PACKAGE': 'package',
         'ENCRYPTED_PACKAGE': 'encrypted_package',
@@ -50,25 +51,39 @@ NAGIOS = {
 }
 
 class TargetException(Exception):
+    __slots__ = ['code']
+    
     def __init__(self, code) -> None:
         self.code = code
+
 
 class TargetError(TargetException):
     def __init__(self, msg) -> None:
         super().__init__(NAGIOS['CRITICAL'])
         log.error(msg)
 
+
 class TargetWarning(TargetException):
     def __init__(self, msg) -> None:
         super().__init__(NAGIOS['WARNING'])
         log.warning(msg)
+
 
 class TargetSkipException(TargetException):
     def __init__(self, msg) -> None:
         super().__init__(NAGIOS['OK'])
         log.info(msg)
 
+
+class TargetCleanupError(TargetException):
+    def __init__(self, msg) -> None:
+        super().__init__(NAGIOS['CRITICAL'])
+        log.critical(msg)
+    
+
 class Cmd():
+    __slots__ = ['output', 'code', 'failed']
+    
     def __init__(self, output, code) -> None:
         self.output = output
         self.code = code
@@ -81,7 +96,17 @@ class Cmd():
         output = process.stderr if process.stderr else process.stdout
         return cls(output.decode('utf-8').replace('\n', ' '), return_code)
 
+
+class Influx():  # TODO action == get-stats
+    __slots__ = ['client']
+    
+    def __init__(self, host, port, user, password, database) -> None:
+        self.client = InfluxDBClient(host, port, user, password, database)
+
+
 class Nsca():
+    __slots__ = ['bin', 'nagios_hosts', 'nagios_host', 'nagios_service', 'host', 'port']
+    
     def __init__(self, nagios_host, nagios_service, host, port) -> None:
         self.bin = '/usr/sbin/send_nsca'
         self.nagios_host = nagios_host
@@ -100,8 +125,11 @@ class Nsca():
         for nagios_status, nagios_code in NAGIOS.items():
             if code == nagios_code: return nagios_status
         return 'UNKNOWN'
+  
            
 class State():
+    __slots__ = ['state_file', 'state']
+    
     def __init__(self, state_file) -> None:
         self.state_file = state_file
         try:
@@ -118,16 +146,15 @@ class State():
         os.chmod(self.state_file, 0o640)
         return {}
         
-    def set_target_status(self, target_name, msg, code) -> None:
-        old_state = self.state.get(target_name)['status'] if self.state.get(target_name) else 'EMPTY'
-        self.state[str(target_name)] = {
-            'code': code,
-            'status': Nsca.get_status_by_code(code),
-            'msg': str(msg)
-        }
+    def set_target_status(self, target_name, new_state) -> None:
         with open(self.state_file, 'w') as f:
-            yaml.safe_dump(self.state, f)
-        log.info(f"State change from {old_state} state to {self.state[str(target_name)]['status']} state")
+            yaml.safe_dump(new_state, f)
+        
+        self.state = new_state
+        curr_status = self.state[str(target_name)]['status']
+        
+        if curr_status != 'OK':
+            log.error(f"State changed to {curr_status}")
         
     def remove_undefined_targets(self, defined_targets) -> None:
         targets_in_state_file = list(self.state.keys())
@@ -154,7 +181,40 @@ class State():
             summary += f"{target_state.get('status')}: [{target}] {target_state.get('msg')}</br>"
         return summary
 
+
+class BackupState(State):
+    def __init__(self, state_file) -> None:
+        super().__init__(state_file)
+    
+    def set_target_status(self, target_name, msg, code) -> None:
+        new_state = self.state
+        new_state[str(target_name)] = {
+            'code': code,
+            'status': Nsca.get_status_by_code(code),
+            'msg': str(msg)
+        }
+        super().set_target_status(target_name, new_state)
+    
+
+class CleanupState(State):
+    def __init__(self, state_file) -> None:
+        super().__init__(state_file)
+    
+    def set_target_status(self, target_name, msg, code, recovered_space=None, total_size=None, max_size=None) -> None:
+        new_state = self.state
+        new_state[str(target_name)] = {
+            'code': code,
+            'status': Nsca.get_status_by_code(code),
+            'recovered_space': recovered_space,
+            'total_size': total_size,
+            'max_size': max_size,
+            'msg': str(msg)
+        }
+        super().set_target_status(target_name, new_state)
+
+
 class Backup():
+    __slots__ = ['path', 'directory', 'package', 'date', 'size', 'incremental_file', 'manifest_file']
     DATE_FORMAT = '%Y-%m-%d_%H-%M'
     
     def __init__(self, path) -> None:
@@ -171,10 +231,6 @@ class Backup():
             self.manifest_file = None
         else:
             raise NameError(f"File '{path}' has not valid filename for backup")
-    
-    def __is_valid_backup(self) -> bool:  # Matches only filenames created by backup tool
-        regex = r'^backup-[\d]{4}-[\d]{2}-[\d]{2}_[\d]{2}-[\d]{2}|\.tar\.gz|\.gpg$'
-        return bool(re.match(regex, self.package))
        
     @property
     def display_date(self) -> str:
@@ -182,13 +238,11 @@ class Backup():
     
     @property
     def display_size(self) -> str:
-        if self.size == 0:
-            return '0B'
-        size_names = ('B', 'KB', 'MB', 'GB', 'TB', 'PB', 'EB', 'ZB', 'YB')
-        i = int(math.floor(math.log(self.size, 1024)))
-        p = math.pow(1024, i)
-        display_size = round(self.size / p, 2)
-        return f'{display_size} {size_names[i]}'
+        return get_display_size(self.size)
+    
+    def __is_valid_backup(self) -> bool:  # Matches only filenames created by backup tool
+        regex = r'^backup-[\d]{4}-[\d]{2}-[\d]{2}_[\d]{2}-[\d]{2}|\.tar\.gz|\.gpg$'
+        return bool(re.match(regex, self.package))
 
     def remove(self) -> None:
         try:
@@ -268,7 +322,7 @@ class TargetValidator():
         
     @staticmethod
     def validate_match(param, regex, value, custom_msg=None):
-        match = re.fullmatch(regex, value)
+        match = re.fullmatch(regex, str(value))
         if not match:
             raise TargetError(f"""Parameter '{param}' with '{value}' value {str(custom_msg) if custom_msg else f"does not match to '{regex}' pattern"}""")
         return match
@@ -277,15 +331,15 @@ class TargetValidator():
     def validate_type(param, class_type, value, custom_msg=None) -> None:
         if not isclass(class_type):
             raise AttributeError(f"Type '{class_type}' is not class")
-        elif not isinstance(class_type, value):
+        elif not isinstance(value, class_type):
             raise TargetError(f"Parameter '{param}' with '{value}' value {str(custom_msg) if custom_msg else f'is not valid {class_type} type'}")
         
     @staticmethod
-    def validate_dir_path(param, dir_path):
+    def validate_absolute_dir_path(param, dir_path):
         regex = r'^((/[a-zA-Z0-9-_]+)+|/)$'
         match = re.fullmatch(regex, dir_path)
         if not match:
-            raise TargetError(f"Parameter '{param}' with '{dir_path}' path is not valid path to directory")
+            raise TargetError(f"Parameter '{param}' with '{dir_path}' path is not valid absolute path to directory")
         return match
     
     @staticmethod 
@@ -299,17 +353,19 @@ class TargetValidator():
             raise TargetError(f"Parameter '{param}' has invalid '{value}' value, possible choices: {allowed_values}")
 
     
-class Target():
+class Target():    
     def __init__(self, name, base_dest, conf, default_conf) -> None:
         self.name = name
         self.backup = None
         self.type = conf.get('type')
-        self.dest = os.path.join(base_dest, conf.get('dest')) or os.path.join(base_dest, self.name)
+        self.dest = os.path.join(base_dest, conf.get('dest')) if conf.get('dest') else os.path.join(base_dest, self.name)
+        self.max_size = None
+        self.max_num = None
         max_size = conf.get('max_size') or default_conf.get('max_size')
         max_num = conf.get('max_num') or default_conf.get('max_num')
-        
+
         if max_size and max_num:
-            log.warning("Parameter 'max_size' and 'max_num' are mutually exclusive, max_num will be overwritten by max_size")
+            log.debug(f"Parameter 'max_size' and 'max_num' are mutually exclusive, max_num ({max_num}) will be overwritten by max_size ({max_size})")
             self.max_size = max_size
         elif not max_size and not max_num:
             raise TargetException("Target must have defined any parameter to declare limitations, by size choose parameter 'max_size' with value <digit><B|KB|MB|GB|TB>, by count select 'max_num' with value <digit>")
@@ -321,8 +377,7 @@ class Target():
         self.format = conf.get('format') or default_conf.get('format')
         self.owner = conf.get('owner') or default_conf.get('owner')
         self.permissions = conf.get('permissions') or default_conf.get('permissions')
-        if self.format == DEFAULTS['FORMATS']['ENCRYPTED_PACKAGE']:
-            self.encryption_key = conf.get('encryption_key') or default_conf.get('encryption_key')
+        self.encryption_key = conf.get('encryption_key') or default_conf.get('encryption_key')
     
     @property
     def type(self) -> str:
@@ -334,7 +389,11 @@ class Target():
     
     @property
     def max_size(self) -> int:
-        return self.max_size
+        return self._max_size
+    
+    @property
+    def display_max_size(self) -> str:
+        return get_display_size(self.max_size)
     
     @property
     def max_num(self) -> int:
@@ -365,7 +424,7 @@ class Target():
     @dest.setter
     def dest(self, value) -> str:
         TargetValidator.validate_required_param('dest', value)
-        TargetValidator.validate_dir_path('dest', value)
+        TargetValidator.validate_absolute_dir_path('dest', value)
         self._dest = value
     
     @max_size.setter
@@ -388,8 +447,12 @@ class Target():
             self._max_size = None
     
     @max_num.setter
-    def max_number(self, value) -> int:
-        return self._max_num
+    def max_num(self, value) -> int:
+        if value:
+            TargetValidator.validate_type('max_num', int, value)
+            self._max_num = value
+        else:
+            self._max_num = None
     
     @format.setter
     def format(self, value) -> str:
@@ -406,28 +469,41 @@ class Target():
     @permissions.setter
     def permissions(self, value) -> str:
         TargetValidator.validate_required_param('permissions', value)
-        TargetValidator.validate_match('permissions', r'^[0-7]{3,4}$', value)
-        self._permissions = value
+        TargetValidator.validate_match('permissions', r'^[0-7]{3}$', value)
+        self._permissions = f'0o{value}'
     
     @encryption_key.setter
     def encryption_key(self, value) -> str:
-        TargetValidator.validate_required_param('encryption_key', value)
-        TargetValidator.validate_type('encryption_key', str, value)
-        self._encryption_key = value
+        if self.format == DEFAULTS['FORMATS']['ENCRYPTED_PACKAGE']:
+            TargetValidator.validate_required_param('encryption_key', value)
+            TargetValidator.validate_type('encryption_key', str, value)
+            self._encryption_key = value
+        else:
+            self._encryption_key = None
     
     def get_conf(self) -> dict[str, str]:  # TODO add comment to dump when variable is taken from default params
         return vars(self)
 
-    def get_backup_count(self) -> int:
-        count = 0
+    def get_backups_size(self) -> int:
+        if os.path.exists(self.dest):
+            result = Cmd.run(f"du -sb '{self.dest}' | awk '{{print $1}}'")
+            if result.failed:
+                raise TargetError(f"Counting total size of backups failed: [{result.code}] {result.output}")
+            else:
+                return int(result.output)
+        else:
+            return 0
+    
+    def get_backups_num(self) -> int:
+        total_num = 0
         try:
             for backup_package in os.listdir(self.dest):
                 try:
                     Backup(os.path.join(self.dest, backup_package))
-                    count += 1
+                    total_num += 1
                 except NameError:
                     continue
-            return int(count)
+            return int(total_num)
         except FileNotFoundError:
             return 0
     
@@ -461,6 +537,7 @@ class Target():
         
     def create_backup(self, path) -> Backup:
         backup = Backup(path)
+        cmd = None
         
         try:
             backup.create_manifest_file(self.format, self.encryption_key)
@@ -477,36 +554,40 @@ class Target():
             new_path = f"{path}.tar.gz.gpg"
             log.info(f"Packing and encrypting backup to '{new_path}'...")
             cmd = f'tar -g "{backup.incremental_file}" -piz -cO "{path}" | gpg2 -er "{self.encryption_key}" --always-trust > "{new_path}" && rm -rf "{path}"'
-            success_msg = f"Backup successfully packed and encrypted to '{new_path}' path"
+            success_msg = f"Backup successfully packed and encrypted to '{new_path}' path" 
+        if cmd:
+            log.debug(f"Packing backup with cmd: {cmd}")
+            result = Cmd.run(cmd)
+
+            if result.failed:
+                backup.remove()
+                raise TargetError(f"Packing backup failed: [{result.code}] {result.output}")
+            else:
+                log.info(success_msg)
+                backup = Backup(new_path)
         else:
             log.debug(f"Backup '{path}' preserved in raw format")
-            return Backup(path)
-        
-        log.debug(f"Packing backup with cmd: {cmd}")
-        result = Cmd.run(cmd)
-
-        if result.failed:
-            backup.remove()
-            raise TargetError(f"Packing backup failed: [{result.code}] {result.output}")
-        else:
-            log.info(success_msg)
-            return Backup(new_path)
+            backup = Backup(path)
+            
+        log.info(f"Backup finished successfully, size: {backup.display_size}")
+        self.backup = backup
+        return backup
                 
     def __str__(self) -> str:
         return self.name
         
     
-class PullTarget(Target):
+class PullTarget(Target):    
     def __init__(self, name, base_dest, conf, default_conf) -> None:
         super().__init__(name, base_dest, conf, default_conf)
         self.sources = conf.get('sources') or default_conf.get('sources')
-        self.timeout = conf.get('sources') or default_conf.get('sources')
+        self.timeout = conf.get('timeout') or default_conf.get('timeout')
         self.password_file = conf.get('password_file') or default_conf.get('password_file')
         self.exclude = conf.get('exclude') or default_conf.get('exclude')
         self.wake_on_lan = bool(conf.get('wake_on_lan'))
         
         if self.wake_on_lan:
-            self.mac_address = conf.get('wake_on_lan').get('mac_address')
+            self._mac_address = conf.get('wake_on_lan').get('mac_address')
     
     @property
     def sources(self) -> list:
@@ -571,7 +652,8 @@ class PullTarget(Target):
         cmd = f'{base_cmd} --contimeout={self.timeout} --password-file="{self.password_file}" {source_args} {new_backup_path}'
 
         os.makedirs(new_backup_path, exist_ok=True)
-        log.debug(f"Pulling backup using rsync with command: {cmd}")
+        log.info(f"Pulling target files to '{self.dest}' path...")
+        log.debug(f"Used rsync cmd: {cmd}")
         result = Cmd.run(cmd)
 
         if result.code == 24:
@@ -579,17 +661,16 @@ class PullTarget(Target):
         elif result.failed:
             shutil.rmtree(new_backup_path)
             raise TargetError(f"Syncing files from source using rsync failed: [{result.code}] {result.output}")
-        log.info(f"Backup saved in '{new_backup_path}'")
         
-        self.backup = super().create_backup(new_backup_path)
-        log.info(f"Backup finished successfully, size: {self.backup.display_size}")
+        log.info(f"Backup pulled and saved in '{new_backup_path}' path")
+        return super().create_backup(new_backup_path)
     
     def send_wol_packet(self) -> None:
         send_magic_packet(self.mac_address)
         log.debug(f'WOL packet sent to {self.mac_address}')
         
 
-class PushTarget(Target):
+class PushTarget(Target):    
     def __init__(self, name, base_dest, work_dir, conf, default_conf) -> None:
         super().__init__(name, base_dest, conf, default_conf)
         self.work_dir = os.path.join(work_dir, self.name)
@@ -600,64 +681,63 @@ class PushTarget(Target):
         return self._work_dir
     
     @property
-    def frequency(self) -> int:
+    def frequency(self) -> int:  # Hours
         return self._frequency
     
     @work_dir.setter
     def work_dir(self, value) -> None:
         TargetValidator.validate_required_param('work_dir', value)
-        TargetValidator.validate_dir_path('work_dir', value)
+        TargetValidator.validate_absolute_dir_path('work_dir', value)
         self._work_dir = value
         
     @frequency.setter
-    def frequency(self, value) -> None:  # * Param examples: 1d = 1 day, 3w = 3 weeks, 2m = 2 months
+    def frequency(self, value) -> None:  # Param examples: 16h = 16hours, 1d = 1 day, 3w = 3 weeks, 2m = 2 months
         TargetValidator.validate_required_param('frequency', value)
-        match = TargetValidator.validate_match('frequency', r'^([\d]{1,4})\s?([d|m|w]{1})$', value)
+        match = TargetValidator.validate_match('frequency', r'^([\d]{1,4})\s?([h|d|m|w]{1})$', value)
         number, date_attr = match.groups()
-        if date_attr == 'd':
+        
+        if date_attr == 'h':
             self._frequency = int(number)
+        elif date_attr == 'd':
+            self._frequency = int(number) * 24
         elif date_attr == 'w':
-            self._frequency = int(number) * 7
+            self._frequency = int(number) * 7 * 24
         elif date_attr == 'm':
-            self._frequency = int(number) * 30
-      
+            self._frequency = int(number) * 30 * 24
+    
     def create_backup(self) -> Backup:
         latest_backup = self.get_latest_backup()
         
-        try:
-            days_ago = (datetime.now() - latest_backup.date).days
-        except AttributeError:  # * There is no backup yet for this target
-            pass
-        finally:
-            os.makedirs(self.work_dir, exist_ok=True)
-            files_in_workdir = os.listdir(self.work_dir)
-            
-            if not latest_backup or days_ago >= self.frequency:  # * There is no backup or correct number of days passed since last backup
-                if files_in_workdir:
-                    new_backup_path = os.path.join(self.dest, Backup.get_today_package_name())
-                    os.makedirs(new_backup_path, exist_ok=True)
-                    
-                    log.info(f"Moving files from '{self.work_dir}' working directory to '{new_backup_path}' path...")
-                    result = Cmd.run(f'mv {self.work_dir}/* {new_backup_path}')
-                    
-                    if result.failed:
-                        shutil.rmtree(new_backup_path)
-                        raise TargetError(f"Moving files from '{self.work_dir}' working directory to '{new_backup_path}' failed: [{result.code}] {result.output}")
-                    else:
-                        log.info(f"Files moved from '{self.work_dir}' working directory to '{new_backup_path}' path")
-                        self.backup = super().create_backup(new_backup_path)
-                        log.info(f"Backup finished successfully, size: {self.backup.display_size}")
+        if latest_backup:
+            last_backup_hours_ago = (datetime.now() - latest_backup.date) // timedelta(hours=1)
+        os.makedirs(self.work_dir, exist_ok=True)
+        files_in_workdir = os.listdir(self.work_dir)
+        
+        if not latest_backup or last_backup_hours_ago >= self.frequency:  # There is no backup or correct number of days passed since last backup
+            if files_in_workdir:
+                new_backup_path = os.path.join(self.dest, Backup.get_today_package_name())
+                os.makedirs(new_backup_path, exist_ok=True)
+                
+                log.info(f"Moving files from '{self.work_dir}' working directory to '{new_backup_path}' path...")
+                result = Cmd.run(f'mv {self.work_dir}/* {new_backup_path}')
+                
+                if result.failed:
+                    shutil.rmtree(new_backup_path)
+                    raise TargetError(f"Moving files from '{self.work_dir}' working directory to '{new_backup_path}' failed: [{result.code}] {result.output}")
                 else:
-                    raise TargetError(f"Not found any file to process in '{self.work_dir}' work directory")
-            elif files_in_workdir:
-                raise TargetWarning(f"Backup should not be created but found some files in '{self.work_dir}' working directory")
+                    log.info(f"Files moved from '{self.work_dir}' working directory to '{new_backup_path}' path")
+                    return super().create_backup(new_backup_path)
             else:
-                raise TargetSkipException(f"Found latest backup from '{latest_backup.display_date}' created {days_ago} days ago, frequency is {self.frequency} days, backup creation skipped")
+                raise TargetError(f"Not found any file to process in '{self.work_dir}' work directory")
+        elif files_in_workdir:
+            raise TargetWarning(f"Backup should not be created but found some files in '{self.work_dir}' working directory")
+        else:
+            raise TargetSkipException(f"Found latest backup from '{latest_backup.display_date}' created {format_hours_to_ago(last_backup_hours_ago)} ago, frequency is {format_hours_to_ago(self.frequency)}, backup creation skipped")
 
 
 def parse_args():
     parser = argparse.ArgumentParser(description='Backup script')
-    parser.add_argument('action', choices=['cleanup', 'run'])
+    parser.add_argument('action', choices=['cleanup', 'run', 'get-stats'])
     parser.add_argument('-v', '--verbose', 
                         action='count', 
                         default=DEFAULTS['LOG_LEVEL'],
@@ -674,8 +754,33 @@ def parse_args():
                         default=True,
                         action='store_true',
                         help=f'Enable to send reports about error iterations to nsca server defined in {DEFAULTS["CONFIG_FILE"]}')
-    
     return parser.parse_args()
+
+def get_display_size(size):
+    if size == 0:
+        return '0B'
+    size_names = ('B', 'KB', 'MB', 'GB', 'TB', 'PB', 'EB', 'ZB', 'YB')
+    i = int(math.floor(math.log(size, 1024)))
+    p = math.pow(1024, i)
+    display_size = round(size / p, 2)
+    return f'{display_size} {size_names[i]}'
+
+def format_hours_to_ago(hours_amount) -> str:
+    days = hours_amount // 24
+    hours = hours_amount % 24
+    
+    if days == 0:
+        return f"{hours} hours" if hours != 1 else f"{hours} hour"
+    elif days == 1:
+        if hours == 0:
+            return "1 day"
+        else:
+            return f"1 day and {hours} hours" if hours != 1 else "1 day and 1 hour"
+    else:
+        if hours == 0:
+            return f"{days} days"
+        else:
+            return f"{days} days and {hours} hours" if hours != 1 else f"{days} days and 1 hour"
 
 def validate_conf_commons(commons) -> None:
     try:
@@ -687,7 +792,6 @@ def validate_conf_commons(commons) -> None:
     except EnvironmentError as error:
         print(f"File '{DEFAULTS['CONFIG_FILE']}' is not valid config: {error}")
         sys.exit(NAGIOS['UNKNOWN'])
-
 
 def set_log_config(log_file, verbose_level) -> None:
     def record_factory(*args, **kwargs) -> log.LogRecord:
@@ -714,42 +818,87 @@ if __name__ == "__main__":
     common_conf = conf.get('common')
     validate_conf_commons(common_conf)
     set_log_config(common_conf.get('log_file'), args.verbose)
-    nsca = Nsca(common_conf.get('nagios_host'), common_conf.get('nagios_service'), common_conf.get('nsca_host'), common_conf.get('nsca_port'))
-    state = State(common_conf.get('state_file'))
+    if args.action == 'cleanup':
+        state = CleanupState(common_conf.get('cleanup_state_file'))
+    else:
+        state = BackupState(common_conf.get('backup_state_file'))
+        nsca = Nsca(common_conf.get('nagios_host'), common_conf.get('nagios_service'), common_conf.get('nsca_host'), common_conf.get('nsca_port'))
     influx_output = ''
     
     for target in args.targets:
         try:
             target_conf = conf['targets'].get(target)
             if not target_conf: 
-                raise TargetError(f'Target not defined in "{DEFAULTS["CONFIG_FILE"]}"')
+                raise TargetError(f"Target not defined in '{DEFAULTS['CONFIG_FILE']}' conf file")
             
             if target_conf.get('type') == DEFAULTS['BACKUP_TYPES']['PUSH']:
                 target = PushTarget(target, common_conf.get('base_dest'), common_conf.get('work_dir'), target_conf, conf.get('default'))
             else:
                 target = PullTarget(target, common_conf.get('base_dest'), target_conf, conf.get('default'))
-             
-            log.info('Start processing target')
+            print('\n' + target.name)
+            
+            log.info(f'[{args.action.upper()}] Start processing target')
 
-            if args.action == 'cleanup':  # TODO - add max_size and max_number of backup to measure
-                if target.get_backup_count() >= target.max:
-                    oldest_backup = target.get_oldest_backup()
-                    log.info(f"Max ({target.max}) number of backups exceeded, oldest backup '{oldest_backup}' will be deleted")
-                    oldest_backup.remove()
+            if args.action == 'cleanup':
+                #total_size = None
+                #total_num = None
+                
+                if target.max_size:
+                    total_size = target.get_backups_size()
+                    if total_size == 0: 
+                        msg = 'No found any backup'
+                        print(f'[{target}] {msg}')
+                        log.warning(msg)
+                        state.set_target_status(target, msg, NAGIOS['WARNING'], 0, 0, target.max_size)
+                    elif total_size >= target.max_size:
+                        total_recovered_space = 0
+                        latest_backup = target.get_latest_backup()
+                        oldest_backup = target.get_oldest_backup()
+                        print(f'current state 111: {get_display_size(target.get_backups_size())} / {target.display_max_size}')
+                        #sys.exit(0)
+                        
+                        while target.max_size - total_size <= latest_backup.size:
+                            if target.get_backups_num() == 1:
+                                raise TargetCleanupError(f"Cleanup failed: only 1 backup left but current max_size limit ({target.display_max_size}) is not enough for next backup (~{latest_backup.display_size}), consider increasing the limit")
+                            print(f'removing {oldest_backup.package}')
+                            oldest_backup.remove()
+                            total_recovered_space += oldest_backup.size
+                            oldest_backup = target.get_oldest_backup()
+                            print(f'current oldest {oldest_backup}')
+                            print(f'current state 222: {get_display_size(target.get_backups_size())} / {target.display_max_size}')
+                            total_size = target.get_backups_size()
+                            print((total_size) / 1024 / 1024)
+                        print(f'current state 333: {get_display_size(target.get_backups_size())} / {target.display_max_size}')
+                        print(f'total_recovered space: {get_display_size(total_recovered_space)}')
+                        print((target.max_size - total_size) / 1024 / 1024)
+                        # TODO add OK msgs, code for nagios
+                    else:
+                        msg = f'No cleanup needed ({get_display_size(total_size)} / {get_display_size(target.max_size)})'
+                        print(f'[{target}] {msg}')
+                        log.info(msg)
+                        state.set_target_status(target, msg, NAGIOS['OK'], 0, total_size, target.max_size)
+                        
+                # elif target.max_num:
+                #     total_num = target.get_backups_num()
+                #     if total_num == 0: 
+                #         log.info('No backups found')
+                #         continue
+
+
+                # if target.get_backups_num() >= target.max:
+                #     oldest_backup = target.get_oldest_backup()
+                #     log.info(f"Max ({target.max}) number of backups exceeded, oldest backup '{oldest_backup}' will be deleted")
+                #     oldest_backup.remove()
             else:
                 if type(target) == PullTarget and target.wake_on_lan: 
                     target.send_wol_packet()
                 target.create_backup()
-                msg = f'[{target}] {target.backup.path} ({target.backup.display_size})'
-                code = NAGIOS['OK']
+                print(f'[{target}] {target.backup.path} ({target.backup.display_size})')
+                state.set_target_status(target, f'{target.backup.path} ({target.backup.display_size})', NAGIOS['OK'])
         except TargetException as e:
-            msg = str(e)
-            code = e.code
-        finally:
-            print(f'{Nsca.get_status_by_code(code)}: {msg}')
-            state.set_target_status(target, msg, code)
-
+            print(f'[{target}] {Nsca.get_status_by_code(e.code)}: {e}')
+            state.set_target_status(target, str(e), e.code)
+        
     state.remove_undefined_targets(list(conf["targets"]))
     #if args.report:
     #    nsca.send_report_to_nagios(NAGIOS[state.get_status()], state.get_summary())
-    # TODO - influx client
