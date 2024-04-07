@@ -949,5 +949,5 @@ if __name__ == "__main__":
         
     state.remove_undefined_targets(list(conf["targets"]))
 
-    #if not args.noReport:
-    #    nsca.send_report_to_nagios(NAGIOS[state.get_most_failure_status()], state.get_summary())
+    if not args.noReport:
+        nsca.send_report_to_nagios(NAGIOS[state.get_most_failure_status()], state.get_summary())
