@@ -3,35 +3,29 @@
 import re
 import os
 import sys
+import pwd
+import grp
 import yaml
-import json
 import math
-import shutil
 import argparse
+from glob import glob
 from influxdb import InfluxDBClient
 from inspect import isclass
-from glob import glob
 from datetime import datetime, timedelta
 from wakeonlan import send_magic_packet
 import subprocess
-import logging as log
+import logging
 
-# TODO - Set permissions on created backup
-#
-# TODO - Edit function to remove backups over max 
-#        Now it is deleting only one backup when number is greater, 
-#        it should constantly deleting backup until number is not greater than max
-#
-# TODO - Info for further ansible
+# NOTE - Info for further ansible
 # apt install gnupg2 tar rsync
-# pip3 install wakeonlan
+# pip3 install wakeonlan influxdb
 # c - create, g - list for incremental, p - preserve permissions, 
 # z - compress to gzip, f - file to backup, i - ignore zero-blocks, O - extract fields to stdio
 
 DEFAULTS = {
     'LOG_LEVEL': 1,
     'CONFIG_FILE': 'backup-tool.yaml',
-    'REQUIRED_COMMON_PARAMS': ['nsca_host', 'nsca_port', 'nagios_host', 'nagios_service', 'base_dest', 'log_file', 'hosts_file', 'backup_state_file', 'cleanup_state_file', 'work_dir'],
+    'REQUIRED_COMMON_PARAMS': ['nsca_host', 'nsca_port', 'nagios_host', 'nagios_backup_service', 'nagios_cleanup_service', 'base_dest', 'log_file', 'hosts_file', 'backup_state_file', 'cleanup_state_file', 'work_dir'],
     'FORMATS': {
         'PACKAGE': 'package',
         'ENCRYPTED_PACKAGE': 'encrypted_package',
@@ -78,7 +72,7 @@ class TargetSkipException(TargetException):
 class TargetCleanupError(TargetException):
     def __init__(self, msg) -> None:
         super().__init__(NAGIOS['CRITICAL'])
-        log.critical(msg)
+        log.error(msg)
     
 
 class Cmd():
@@ -97,12 +91,19 @@ class Cmd():
         return cls(output.decode('utf-8').replace('\n', ' '), return_code)
 
 
-class Influx():  # TODO action == get-stats
+class Influx():  # TODO - Setup pushing stats to influx
     __slots__ = ['client']
     
-    def __init__(self, host, port, user, password, database) -> None:
+    def __init__(self, host, port, user, password_file, database) -> None:
+        if not os.path.isfile(password_file):
+            raise FileNotFoundError(f"File with password to connect {host}:{port} influx server does not exist or not valid file")
+        elif os.stat(password_file).st_size == 0:
+            raise OSError(f"File with password to connect {host}:{port} influx server is empty, provide single line with password")
+        with open(password_file, 'r') as f:
+            password = f.read().strip()
         self.client = InfluxDBClient(host, port, user, password, database)
-
+        self.client.ping()
+            
 
 class Nsca():
     __slots__ = ['bin', 'nagios_hosts', 'nagios_host', 'nagios_service', 'host', 'port']
@@ -146,15 +147,20 @@ class State():
         os.chmod(self.state_file, 0o640)
         return {}
         
-    def set_target_status(self, target_name, new_state) -> None:
+    def set_target_status(self, target_name, new_state, msg) -> None:
         with open(self.state_file, 'w') as f:
             yaml.safe_dump(new_state, f)
         
         self.state = new_state
         curr_status = self.state[str(target_name)]['status']
+        print(f'[{target_name}] {curr_status}: {msg}')
         
-        if curr_status != 'OK':
-            log.error(f"State changed to {curr_status}")
+        if curr_status == 'CRITICAL':
+            log.error(msg)
+        elif curr_status == 'WARNING':
+            log.warning(msg)
+        else:
+            log.info(msg)
         
     def remove_undefined_targets(self, defined_targets) -> None:
         targets_in_state_file = list(self.state.keys())
@@ -165,7 +171,7 @@ class State():
         with open(self.state_file, 'w') as f:
             yaml.safe_dump(self.state, f)
         
-    def get_status(self) -> str:
+    def get_most_failure_status(self) -> str:
         most_failure_status = 'OK'
         
         for target_state in self.state.values():
@@ -193,24 +199,26 @@ class BackupState(State):
             'status': Nsca.get_status_by_code(code),
             'msg': str(msg)
         }
-        super().set_target_status(target_name, new_state)
+        super().set_target_status(target_name, new_state, msg)
     
 
 class CleanupState(State):
     def __init__(self, state_file) -> None:
         super().__init__(state_file)
     
-    def set_target_status(self, target_name, msg, code, recovered_space=None, total_size=None, max_size=None) -> None:
+    def set_target_status(self, target_name, msg, code, recovered_space=None, removed_backups=None, total_size=None, max_size=None, max_num=None) -> None:
         new_state = self.state
         new_state[str(target_name)] = {
             'code': code,
             'status': Nsca.get_status_by_code(code),
             'recovered_space': recovered_space,
+            'removed_backups': removed_backups,
             'total_size': total_size,
             'max_size': max_size,
+            'max_num': max_num,
             'msg': str(msg)
         }
-        super().set_target_status(target_name, new_state)
+        super().set_target_status(target_name, new_state, msg)
 
 
 class Backup():
@@ -252,10 +260,7 @@ class Backup():
             if manifest_file:
                 files_to_delete.append(manifest_file)
             for file_to_delete in files_to_delete:
-                try:
-                    shutil.rmtree(file_to_delete)
-                except NotADirectoryError:
-                    os.remove(file_to_delete)
+                remove_file_or_dir(file_to_delete)
             log.info(f"Backup '{self}' deleted [{self.display_size}]")
         except PermissionError as error:
             raise TargetError(f"Cannot delete backup '{self}', reason: {error}")
@@ -295,6 +300,14 @@ class Backup():
         self.manifest_file = packed_manifest_file if packed_manifest_file else manifest_file
         log.info(f"Manifest file created in '{self.manifest_file}'")
 
+    def set_permissions(self, permissions) -> None:
+        os.chmod(self.path, eval(f"0o{permissions}"))
+    
+    def set_owner(self, owner) -> None:
+        uid = pwd.getpwnam(owner).pw_uid
+        gid = grp.getgrnam(owner).gr_gid
+        os.chown(self.path, uid, gid)
+    
     @staticmethod
     def get_today_package_name() -> str:
         return f'backup-{datetime.now().strftime(Backup.DATE_FORMAT)}'
@@ -326,6 +339,11 @@ class TargetValidator():
         if not match:
             raise TargetError(f"""Parameter '{param}' with '{value}' value {str(custom_msg) if custom_msg else f"does not match to '{regex}' pattern"}""")
         return match
+    
+    @staticmethod
+    def validate_min_value(param, min_value, value) -> None:
+        if value < min_value:
+            raise TargetError(f"Parameter '{param}' with '{value}' value is too small, minimal value is {min_value}")
 
     @staticmethod
     def validate_type(param, class_type, value, custom_msg=None) -> None:
@@ -408,7 +426,7 @@ class Target():
         return self._owner
     
     @property
-    def permissions(self) -> str:
+    def permissions(self) -> int:
         return self._permissions
     
     @property
@@ -450,6 +468,7 @@ class Target():
     def max_num(self, value) -> int:
         if value:
             TargetValidator.validate_type('max_num', int, value)
+            TargetValidator.validate_min_value('max_num', 2, value)
             self._max_num = value
         else:
             self._max_num = None
@@ -470,7 +489,7 @@ class Target():
     def permissions(self, value) -> str:
         TargetValidator.validate_required_param('permissions', value)
         TargetValidator.validate_match('permissions', r'^[0-7]{3}$', value)
-        self._permissions = f'0o{value}'
+        self._permissions = value
     
     @encryption_key.setter
     def encryption_key(self, value) -> str:
@@ -568,8 +587,14 @@ class Target():
         else:
             log.debug(f"Backup '{path}' preserved in raw format")
             backup = Backup(path)
-            
-        log.info(f"Backup finished successfully, size: {backup.display_size}")
+        
+        try:
+            backup.set_permissions(self.permissions)
+            backup.set_owner(self.owner)
+        except PermissionError as e:
+            backup.remove()
+            raise TargetError(f'Setting backup privileges failed: {e}')
+        log.info(f"Backup finished successfully")
         self.backup = backup
         return backup
                 
@@ -659,8 +684,8 @@ class PullTarget(Target):
         if result.code == 24:
             log.warning(f"Some files vanished in source during syncing: [{result.code}] {result.output}")
         elif result.failed:
-            shutil.rmtree(new_backup_path)
-            raise TargetError(f"Syncing files from source using rsync failed: [{result.code}] {result.output}")
+            remove_file_or_dir(new_backup_path)
+            raise TargetError(f"Pulling target files failed: [{result.code}] rsync: {result.output}")
         
         log.info(f"Backup pulled and saved in '{new_backup_path}' path")
         return super().create_backup(new_backup_path)
@@ -722,7 +747,7 @@ class PushTarget(Target):
                 result = Cmd.run(f'mv {self.work_dir}/* {new_backup_path}')
                 
                 if result.failed:
-                    shutil.rmtree(new_backup_path)
+                    remove_file_or_dir(new_backup_path)
                     raise TargetError(f"Moving files from '{self.work_dir}' working directory to '{new_backup_path}' failed: [{result.code}] {result.output}")
                 else:
                     log.info(f"Files moved from '{self.work_dir}' working directory to '{new_backup_path}' path")
@@ -735,28 +760,41 @@ class PushTarget(Target):
             raise TargetSkipException(f"Found latest backup from '{latest_backup.display_date}' created {format_hours_to_ago(last_backup_hours_ago)} ago, frequency is {format_hours_to_ago(self.frequency)}, backup creation skipped")
 
 
+def remove_file_or_dir(path) -> None:
+    result = Cmd.run(f"rm -rf '{path}'")
+    if result.failed:
+        raise TargetError(f"Removing '{path}' failed: [{result.code}] {result.output}")
+
 def parse_args():
-    parser = argparse.ArgumentParser(description='Backup script')
-    parser.add_argument('action', choices=['cleanup', 'run', 'get-stats'])
+    parser = argparse.ArgumentParser(description='Backup script', add_help=False)
+    parser.add_argument('action', choices=['cleanup', 'run', 'push-stats'])
+    action = parser.parse_known_args()[0].action
     parser.add_argument('-v', '--verbose', 
                         action='count', 
                         default=DEFAULTS['LOG_LEVEL'],
                         help=f'Default verbose level is {DEFAULTS["LOG_LEVEL"]}')
-    parser.add_argument('-t', '--targets',
-                        required=True,
-                        nargs='+',
-                        help=f'Target list defined in {DEFAULTS["CONFIG_FILE"]} configuration file under "targets" markup')
-    parser.add_argument('-m', '--mode',
-                        default='full',
-                        choices=['full', 'inc'],
-                        help=f'Some help text')
-    parser.add_argument('-r', '--report',
-                        default=True,
-                        action='store_true',
-                        help=f'Enable to send reports about error iterations to nsca server defined in {DEFAULTS["CONFIG_FILE"]}')
+    if action != 'push-stats':
+        parser.add_argument('-t', '--targets',
+                            required=True,
+                            nargs='+',
+                            help=f'Target list defined in {DEFAULTS["CONFIG_FILE"]} configuration file under "targets" markup')
+        parser.add_argument('-m', '--mode',
+                            default='full',
+                            choices=['full', 'inc'],
+                            help=f'Not implemented yet, currently all backups are full')
+        parser.add_argument('--noReport',
+                            default=False,
+                            action='store_true',
+                            help=f'Disable sending state of this iteration to NSCA server defined in {DEFAULTS["CONFIG_FILE"]}')
+    if action == 'cleanup':
+        parser.add_argument('--force',
+                            default=False,
+                            action='store_true',
+                            help=f'Clean backups to 0 backups, even if limits are to small, no matter what')
+    parser.add_argument('-h', '--help', action='help')
     return parser.parse_args()
 
-def get_display_size(size):
+def get_display_size(size) -> str:
     if size == 0:
         return '0B'
     size_names = ('B', 'KB', 'MB', 'GB', 'TB', 'PB', 'EB', 'ZB', 'YB')
@@ -793,21 +831,22 @@ def validate_conf_commons(commons) -> None:
         print(f"File '{DEFAULTS['CONFIG_FILE']}' is not valid config: {error}")
         sys.exit(NAGIOS['UNKNOWN'])
 
-def set_log_config(log_file, verbose_level) -> None:
-    def record_factory(*args, **kwargs) -> log.LogRecord:
+def get_logger(log_file, verbose_level) -> None:
+    def record_factory(*args, **kwargs) -> logging.LogRecord:
         record = old_factory(*args, **kwargs)
         record.target = target
         return record
     
-    log.basicConfig(
+    logging.basicConfig(
         filename = log_file, 
         format = '%(asctime)s %(name)s %(levelname)s [%(target)s] %(message)s', 
         datefmt = '%Y-%m-%d %H:%M:%S', 
         level = 30 - (10 * verbose_level) if verbose_level > 0 else 0
     )
 
-    old_factory = log.getLogRecordFactory()
-    log.setLogRecordFactory(record_factory)
+    old_factory = logging.getLogRecordFactory()
+    logging.setLogRecordFactory(record_factory)
+    return logging.getLogger('backup-tool')
 
 if __name__ == "__main__":
     args = parse_args()
@@ -817,14 +856,31 @@ if __name__ == "__main__":
         
     common_conf = conf.get('common')
     validate_conf_commons(common_conf)
-    set_log_config(common_conf.get('log_file'), args.verbose)
+    log = get_logger(common_conf.get('log_file'), args.verbose)
+    target = '-'
+    
     if args.action == 'cleanup':
         state = CleanupState(common_conf.get('cleanup_state_file'))
+        nagios_service = common_conf.get('nagios_cleanup_service')
     else:
         state = BackupState(common_conf.get('backup_state_file'))
-        nsca = Nsca(common_conf.get('nagios_host'), common_conf.get('nagios_service'), common_conf.get('nsca_host'), common_conf.get('nsca_port'))
-    influx_output = ''
+        nagios_service = common_conf.get('nagios_backup_service')
     
+    nsca = Nsca(common_conf.get('nagios_host'), nagios_service, common_conf.get('nsca_host'), common_conf.get('nsca_port'))
+    
+    if args.action == 'push-stats':
+        influx_host = common_conf.get('influx_host')
+        influx_port = common_conf.get('influx_port')    
+        print(f'[{args.action.upper()}] Start pushing stats to {influx_host}:{influx_port}')
+        log.info(f'[{args.action.upper()}] Start pushing stats to {influx_host}:{influx_port}')
+        try:
+            influxdb = Influx(influx_host, influx_port, common_conf.get('influx_user'), common_conf.get('influx_password_file'), common_conf.get('influx_database'))
+        except (OSError, FileNotFoundError, ConnectionError) as e:
+            print(f"ERROR: Connection to influx server failed: {e}")
+            log.error(f"ERROR: Connection to influx server failed: {e}")
+            sys.exit(1)
+        sys.exit(0)
+        
     for target in args.targets:
         try:
             target_conf = conf['targets'].get(target)
@@ -835,70 +891,63 @@ if __name__ == "__main__":
                 target = PushTarget(target, common_conf.get('base_dest'), common_conf.get('work_dir'), target_conf, conf.get('default'))
             else:
                 target = PullTarget(target, common_conf.get('base_dest'), target_conf, conf.get('default'))
-            print('\n' + target.name)
             
             log.info(f'[{args.action.upper()}] Start processing target')
 
-            if args.action == 'cleanup':
-                #total_size = None
-                #total_num = None
-                
-                if target.max_size:
-                    total_size = target.get_backups_size()
-                    if total_size == 0: 
-                        msg = 'No found any backup'
-                        print(f'[{target}] {msg}')
-                        log.warning(msg)
-                        state.set_target_status(target, msg, NAGIOS['WARNING'], 0, 0, target.max_size)
-                    elif total_size >= target.max_size:
-                        total_recovered_space = 0
-                        latest_backup = target.get_latest_backup()
-                        oldest_backup = target.get_oldest_backup()
-                        print(f'current state 111: {get_display_size(target.get_backups_size())} / {target.display_max_size}')
-                        #sys.exit(0)
-                        
-                        while target.max_size - total_size <= latest_backup.size:
-                            if target.get_backups_num() == 1:
-                                raise TargetCleanupError(f"Cleanup failed: only 1 backup left but current max_size limit ({target.display_max_size}) is not enough for next backup (~{latest_backup.display_size}), consider increasing the limit")
-                            print(f'removing {oldest_backup.package}')
-                            oldest_backup.remove()
-                            total_recovered_space += oldest_backup.size
-                            oldest_backup = target.get_oldest_backup()
-                            print(f'current oldest {oldest_backup}')
-                            print(f'current state 222: {get_display_size(target.get_backups_size())} / {target.display_max_size}')
-                            total_size = target.get_backups_size()
-                            print((total_size) / 1024 / 1024)
-                        print(f'current state 333: {get_display_size(target.get_backups_size())} / {target.display_max_size}')
-                        print(f'total_recovered space: {get_display_size(total_recovered_space)}')
-                        print((target.max_size - total_size) / 1024 / 1024)
-                        # TODO add OK msgs, code for nagios
-                    else:
-                        msg = f'No cleanup needed ({get_display_size(total_size)} / {get_display_size(target.max_size)})'
-                        print(f'[{target}] {msg}')
-                        log.info(msg)
-                        state.set_target_status(target, msg, NAGIOS['OK'], 0, total_size, target.max_size)
-                        
-                # elif target.max_num:
-                #     total_num = target.get_backups_num()
-                #     if total_num == 0: 
-                #         log.info('No backups found')
-                #         continue
-
-
-                # if target.get_backups_num() >= target.max:
-                #     oldest_backup = target.get_oldest_backup()
-                #     log.info(f"Max ({target.max}) number of backups exceeded, oldest backup '{oldest_backup}' will be deleted")
-                #     oldest_backup.remove()
-            else:
+            if args.action == 'run':
                 if type(target) == PullTarget and target.wake_on_lan: 
                     target.send_wol_packet()
                 target.create_backup()
-                print(f'[{target}] {target.backup.path} ({target.backup.display_size})')
-                state.set_target_status(target, f'{target.backup.path} ({target.backup.display_size})', NAGIOS['OK'])
+                state.set_target_status(target, f'({target.backup.display_size}) {target.backup.path}', NAGIOS['OK'])
+            elif args.action == 'cleanup':
+                total_recovered_space = 0
+                total_removed_backups = 0
+                total_num = target.get_backups_num()
+                total_size = target.get_backups_size()
+                
+                if total_num == 0: 
+                    state.set_target_status(target, 'No found any backup', NAGIOS['WARNING'], total_recovered_space, total_removed_backups, target.max_size)
+                elif target.max_size:
+                    if total_size >= target.max_size:
+                        latest_backup = target.get_latest_backup()
+                        oldest_backup = target.get_oldest_backup()
+                        
+                        log.info(f"Start cleanup, current total size over limit ({get_display_size(total_size)} / {target.display_max_size})")
+
+                        while target.max_size - total_size <= latest_backup.size * 1.5:  # Directory needs to have at least 150% of latest backup size
+                            if target.get_backups_num() == 1 and not args.force:
+                                raise TargetCleanupError(f"Cleanup aborted, only 1 backup left but current max_size limit ({target.display_max_size}) is not enough for next backup (~{latest_backup.display_size}), consider increasing the limit or use -f/--force are to process cleanup")
+                            oldest_backup.remove()
+                            total_removed_backups += 1
+                            total_recovered_space += oldest_backup.size
+                            oldest_backup = target.get_oldest_backup()
+                            total_size = target.get_backups_size()
+                        msg = f'Cleanup finished, removed {total_removed_backups} backup/s, recovered {get_display_size(total_recovered_space)} ({get_display_size(target.get_backups_size())} / {target.display_max_size})'
+                        state.set_target_status(target, msg, NAGIOS['OK'], total_recovered_space, total_removed_backups, total_size, target.max_size, target.max_num)
+                    else:
+                        msg = f'No cleanup needed ({get_display_size(total_size)} / {get_display_size(target.max_size)})'
+                        state.set_target_status(target, msg, NAGIOS['OK'], total_recovered_space, total_removed_backups, total_size, target.max_size, target.max_num)
+                elif target.max_num:
+                    if total_num >= target.max_num:                      
+                        log.info(f"Start cleanup, max number of backups exceeded ({total_num} / {target.max_num})")
+                        
+                        while total_num >= target.max_num:
+                            if total_num == 1 and not args.force:
+                                raise TargetCleanupError(f"Cleanup aborted, only 1 backup left and current max_num limit allows only for {target.max_num} backup, directory cannot be empty, consider increasing the limit or use -f/--force are to process cleanup")
+                            oldest_backup = target.get_oldest_backup()
+                            oldest_backup.remove()
+                            total_removed_backups += 1
+                            total_recovered_space += oldest_backup.size
+                            total_num = target.get_backups_num()
+                        msg = f'Cleanup finished, removed {total_removed_backups} backup/s, recovered {get_display_size(total_recovered_space)} ({total_num} / {target.max_num})'
+                        state.set_target_status(target, msg, NAGIOS['OK'], total_recovered_space, total_removed_backups, total_size, target.max_size, target.max_num)
+                    else:
+                        msg = f'No cleanup needed ({total_num} / {target.max_num})'
+                        state.set_target_status(target, msg, NAGIOS['OK'], total_recovered_space, total_removed_backups, total_size, target.max_size, target.max_num)
         except TargetException as e:
-            print(f'[{target}] {Nsca.get_status_by_code(e.code)}: {e}')
             state.set_target_status(target, str(e), e.code)
         
     state.remove_undefined_targets(list(conf["targets"]))
-    #if args.report:
-    #    nsca.send_report_to_nagios(NAGIOS[state.get_status()], state.get_summary())
+
+    #if not args.noReport:
+    #    nsca.send_report_to_nagios(NAGIOS[state.get_most_failure_status()], state.get_summary())
