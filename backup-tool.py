@@ -24,7 +24,7 @@ import logging
 
 DEFAULTS = {
     'LOG_LEVEL': 1,
-    'CONFIG_FILE': 'backup-tool.yaml',
+    'CONFIG_FILE': '/etc/backup-tool/backup-tool.yaml',
     'REQUIRED_COMMON_PARAMS': ['nsca_host', 'nsca_port', 'nagios_host', 'nagios_backup_service', 'nagios_cleanup_service', 'base_dest', 'log_file', 'hosts_file', 'backup_state_file', 'cleanup_state_file', 'work_dir'],
     'FORMATS': {
         'PACKAGE': 'package',
