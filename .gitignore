@@ -1,4 +1,9 @@
 backup-tool.yaml
 backup-tool.log
-backup-tool-state.yaml
+backup-state.yaml
+cleanup-state.yaml
 rsyncpass
+influxpass
+.vscode
+test-backups
+test-workdir
