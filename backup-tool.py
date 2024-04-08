@@ -671,7 +671,7 @@ class PullTarget(Target):
     def create_backup(self) -> Backup:
         new_backup_path = os.path.join(self.dest, Backup.get_today_package_name())
         
-        base_cmd = f'rsync -a --progress --info=stats2 --contimeout={self.timeout} --password-file="{self.password_file}"'
+        base_cmd = f'rsync -a --progress --info=stats2 --password-file="{self.password_file}"' # TODO --contimeout={self.timeout}
         if self.exclude:
             exclude_args = ' '.join(f'--exclude "{exclude_arg}"' for exclude_arg in self.exclude)
             base_cmd = f'{base_cmd} {exclude_args}'
@@ -687,17 +687,15 @@ class PullTarget(Target):
         elif result.failed:
             remove_file_or_dir(new_backup_path)
             raise TargetError(f"Pulling target files failed: [{result.code}] rsync: {result.output}")
-        print(result.output)
+        
+        log.info(f"Backup pulled and saved in '{new_backup_path}' path")
+        
         try:
             rsync_log_output = Cmd.run(f"tail -n 30 {new_backup_path}/rsync.log").output
-            print(rsync_log_output)
             self.files_num = int(re.findall(r'[nN]umber\sof\sfiles:\s([0-9,]*)', rsync_log_output)[0])
             self.transfer_speed = float(re.findall(r'bytes[\s]*?([0-9,.]*)\s?bytes/sec', rsync_log_output)[0].replace(',', ''))
         except Exception as e:
-            log.error(f'Failed to get metrics from rsync output: {e}')
-        print(self.files_num)
-        print(self.transfer_speed)
-        log.info(f"Backup pulled and saved in '{new_backup_path}' path")
+            log.error(f'Failed to get stats from rsync output: {e}')
         return super().create_backup(new_backup_path)
     
     def send_wol_packet(self) -> None:
