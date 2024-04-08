@@ -16,12 +16,6 @@ from wakeonlan import send_magic_packet
 import subprocess
 import logging
 
-# NOTE - Info for further ansible
-# apt install gnupg2 tar rsync
-# pip3 install wakeonlan influxdb
-# c - create, g - list for incremental, p - preserve permissions, 
-# z - compress to gzip, f - file to backup, i - ignore zero-blocks, O - extract fields to stdio
-
 DEFAULTS = {
     'LOG_LEVEL': 1,
     'CONFIG_FILE': '/etc/backup-tool/backup-tool.yaml',
@@ -192,11 +186,13 @@ class BackupState(State):
     def __init__(self, state_file) -> None:
         super().__init__(state_file)
     
-    def set_target_status(self, target_name, msg, code) -> None:
+    def set_target_status(self, target_name, msg, code, files_num=None, transfer_speed=None) -> None:
         new_state = self.state
         new_state[str(target_name)] = {
             'code': code,
             'status': Nsca.get_status_by_code(code),
+            'files_num': files_num,
+            'transfer_speed': transfer_speed,
             'msg': str(msg)
         }
         super().set_target_status(target_name, new_state, msg)
@@ -292,6 +288,8 @@ class Backup():
                 log.warning(f"Backup '{self.path}' is encrypted, but no encryption key is provided to encrypt manifest file {manifest_file}, manifest file will be only created as package")
                 encrypting_failed = True
         if format == DEFAULTS['FORMATS']['PACKAGE'] or encrypting_failed:
+            # c - create, g - list for incremental, p - preserve permissions, 
+            # z - compress to gzip, f - file to backup, i - ignore zero-blocks, O - extract fields to stdio
             packed_manifest_file = manifest_file.replace('.txt', '.tar.gz')
             result = Cmd.run(f'tar czf "{packed_manifest_file}" "{manifest_file}" && rm -rf "{manifest_file}"')    
         
@@ -381,6 +379,8 @@ class Target():
         self.max_num = None
         max_size = conf.get('max_size') or default_conf.get('max_size')
         max_num = conf.get('max_num') or default_conf.get('max_num')
+        self.files_num = None
+        self.transfer_speed = None
 
         if max_size and max_num:
             log.debug(f"Parameter 'max_size' and 'max_num' are mutually exclusive, max_num ({max_num}) will be overwritten by max_size ({max_size})")
@@ -610,6 +610,8 @@ class PullTarget(Target):
         self.password_file = conf.get('password_file') or default_conf.get('password_file')
         self.exclude = conf.get('exclude') or default_conf.get('exclude')
         self.wake_on_lan = bool(conf.get('wake_on_lan'))
+        self.files_num = 0
+        self.transfer_speed = 0  # bytes per sec
         
         if self.wake_on_lan:
             self._mac_address = conf.get('wake_on_lan').get('mac_address')
@@ -669,15 +671,16 @@ class PullTarget(Target):
     def create_backup(self) -> Backup:
         new_backup_path = os.path.join(self.dest, Backup.get_today_package_name())
         
-        base_cmd = 'rsync -alt'
+        base_cmd = f'rsync -a --progress --info=stats2 --contimeout={self.timeout} --password-file="{self.password_file}"'
         if self.exclude:
             exclude_args = ' '.join(f'--exclude "{exclude_arg}"' for exclude_arg in self.exclude)
             base_cmd = f'{base_cmd} {exclude_args}'
-        source_args = ' '.join(directory for directory in self.sources)
-        cmd = f'{base_cmd} --contimeout={self.timeout} --password-file="{self.password_file}" {source_args} {new_backup_path}'
-
+        source_args = ' '.join(source for source in self.sources)
+        print(os.path.join(new_backup_path, "rsync.log"))
+        cmd = f'{base_cmd} {source_args} {new_backup_path} > {os.path.join(new_backup_path, "rsync.log")}' 
+        print(cmd)
         os.makedirs(new_backup_path, exist_ok=True)
-        log.info(f"Pulling target files to '{self.dest}' path...")
+        log.info(f"Pulling target files to '{new_backup_path}' path...")
         log.debug(f"Used rsync cmd: {cmd}")
         result = Cmd.run(cmd)
 
@@ -686,7 +689,16 @@ class PullTarget(Target):
         elif result.failed:
             remove_file_or_dir(new_backup_path)
             raise TargetError(f"Pulling target files failed: [{result.code}] rsync: {result.output}")
-        
+        print(result.output)
+        try:
+            rsync_log_output = Cmd.run(f"tail -n 30 {new_backup_path}/rsync.log").output
+            print(rsync_log_output)
+            self.files_num = int(re.findall(r'[nN]umber\sof\sfiles:\s([0-9,]*)', rsync_log_output)[0])
+            self.transfer_speed = float(re.findall(r'bytes[\s]*?([0-9,.]*)\s?bytes/sec', rsync_log_output)[0].replace(',', ''))
+        except Exception as e:
+            log.error(f'Failed to get metrics from rsync output: {e}')
+        print(self.files_num)
+        print(self.transfer_speed)
         log.info(f"Backup pulled and saved in '{new_backup_path}' path")
         return super().create_backup(new_backup_path)
     
@@ -898,7 +910,7 @@ if __name__ == "__main__":
                 if type(target) == PullTarget and target.wake_on_lan: 
                     target.send_wol_packet()
                 target.create_backup()
-                state.set_target_status(target, f'({target.backup.display_size}) {target.backup.path}', NAGIOS['OK'])
+                state.set_target_status(target, f'({target.backup.display_size}) {target.backup.path}', NAGIOS['OK'], target.files_num, target.transfer_speed)
             elif args.action == 'cleanup':
                 total_recovered_space = 0
                 total_removed_backups = 0
@@ -949,5 +961,5 @@ if __name__ == "__main__":
         
     state.remove_undefined_targets(list(conf["targets"]))
 
-    if not args.noReport:
-        nsca.send_report_to_nagios(NAGIOS[state.get_most_failure_status()], state.get_summary())
+    #if not args.noReport:
+    #    nsca.send_report_to_nagios(NAGIOS[state.get_most_failure_status()], state.get_summary())
