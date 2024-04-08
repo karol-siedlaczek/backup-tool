@@ -676,9 +676,7 @@ class PullTarget(Target):
             exclude_args = ' '.join(f'--exclude "{exclude_arg}"' for exclude_arg in self.exclude)
             base_cmd = f'{base_cmd} {exclude_args}'
         source_args = ' '.join(source for source in self.sources)
-        print(os.path.join(new_backup_path, "rsync.log"))
         cmd = f'{base_cmd} {source_args} {new_backup_path} > {os.path.join(new_backup_path, "rsync.log")}' 
-        print(cmd)
         os.makedirs(new_backup_path, exist_ok=True)
         log.info(f"Pulling target files to '{new_backup_path}' path...")
         log.debug(f"Used rsync cmd: {cmd}")
