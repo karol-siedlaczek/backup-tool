@@ -18,7 +18,7 @@ import logging
 
 DEFAULTS = {
     'LOG_LEVEL': 1,
-    'CONFIG_FILE': '/etc/backup-tool/backup-tool.yaml',
+    'CONFIG_FILE': 'backup-tool.yaml',
     'REQUIRED_COMMON_PARAMS': ['nsca_host', 'nsca_port', 'nagios_host', 'nagios_backup_service', 'nagios_cleanup_service', 'base_dest', 'log_file', 'hosts_file', 'backup_state_file', 'cleanup_state_file', 'work_dir'],
     'FORMATS': {
         'PACKAGE': 'package',
@@ -67,22 +67,6 @@ class TargetCleanupError(TargetException):
     def __init__(self, msg) -> None:
         super().__init__(NAGIOS['CRITICAL'])
         log.error(msg)
-    
-
-class Cmd():
-    __slots__ = ['output', 'code', 'failed']
-    
-    def __init__(self, output, code) -> None:
-        self.output = output
-        self.code = code
-        self.failed = code > 0
-    
-    @classmethod
-    def run(cls, cmd):
-        process = subprocess.run(cmd, stdin=subprocess.DEVNULL, stderr=subprocess.PIPE, stdout=subprocess.PIPE, shell=True)
-        return_code = process.returncode
-        output = process.stderr if process.stderr else process.stdout
-        return cls(output.decode('utf-8').replace('\n', ' '), return_code)
 
 
 class Influx():  # TODO - Setup pushing stats to influx
@@ -110,10 +94,11 @@ class Nsca():
         self.port = port
     
     def send_report_to_nagios(self, code, msg) -> None:
-        cmd = f"echo -e '{self.nagios_host}\t{self.nagios_service}\t{code}\t{msg}' | {self.bin} -H {self.host} -p {self.port}"
-        result = Cmd.run(cmd)
-        if result.failed:
-            raise ConnectionError(f"Sending nsca packet to {self.host}:{self.port} failed: {result.output}")
+        try:
+            run_cmd(f"echo -e '{self.nagios_host}\t{self.nagios_service}\t{code}\t{msg}' | {self.bin} -H {self.host} -p {self.port}", True)
+        except subprocess.CalledProcessError as e:
+            raise ConnectionError(f"Sending nsca packet to {self.host}:{self.port} failed: {e}: {e.stderr}")
+            
         
     @staticmethod
     def get_status_by_code(code) -> str:
@@ -186,17 +171,24 @@ class BackupState(State):
     def __init__(self, state_file) -> None:
         super().__init__(state_file)
     
-    def set_target_status(self, target_name, msg, code, files_num=None, transfer_speed=None) -> None:
+    def set_target_status(self, target_name, msg, code, elapsed_time_copy=None, elapsed_time_pack=None, transfer_speed_copy=None, transfer_speed_pack=None) -> None:
         new_state = self.state
         new_state[str(target_name)] = {
             'code': code,
             'status': Nsca.get_status_by_code(code),
-            'files_num': files_num,
-            'transfer_speed': transfer_speed,
+            'time': {
+                'copy': {
+                    'duration': elapsed_time_copy,
+                    'transfer_speed': transfer_speed_copy
+                },
+                'pack': {
+                    'duration': elapsed_time_copy,
+                    'transfer_speed': transfer_speed_pack
+                }
+            },
             'msg': str(msg)
         }
         super().set_target_status(target_name, new_state, msg)
-    
 
 class CleanupState(State):
     def __init__(self, state_file) -> None:
@@ -273,29 +265,33 @@ class Backup():
     def create_manifest_file(self, format, encryption_key=None) -> None:
         manifest_file = os.path.join(self.directory, 'manifests', f'manifest-{self.display_date}.txt')
         os.makedirs(os.path.join(self.directory, 'manifests'), exist_ok=True)
-        result = Cmd.run(f'find "{self.path}" -printf "%AF %AT\t%s\t%p\n" > "{manifest_file}"')
-        encrypting_failed = False
-        packed_manifest_file = None
-
-        if result.failed:
-            raise TargetError(f"Getting content to manifest file from '{self.path}' failed: [{result.code}] {result.output}")
+        try:
+            with open(manifest_file, 'w') as f:
+                f.writelines(run_cmd(f'/usr/bin/find {self.path} -printf %AF-%AT\t%s\t%p\n'))
+        except subprocess.CalledProcessError as e:
+            raise TargetError(f"Getting content to manifest file from '{self.path}' failed: {e}: {e.stderr}")
         
-        if format == DEFAULTS['FORMATS']['ENCRYPTED_PACKAGE']:
-            packed_manifest_file = manifest_file.replace('.txt', '.tar.gz.gpg')
-            if encryption_key:
-                result = Cmd.run(f'tar czO "{manifest_file}" | gpg2 -er "{encryption_key}" --always-trust > "{packed_manifest_file}" && rm -rf "{manifest_file}"')
-            else:
-                log.warning(f"Backup '{self.path}' is encrypted, but no encryption key is provided to encrypt manifest file {manifest_file}, manifest file will be only created as package")
-                encrypting_failed = True
-        if format == DEFAULTS['FORMATS']['PACKAGE'] or encrypting_failed:
-            # c - create, g - list for incremental, p - preserve permissions, 
-            # z - compress to gzip, f - file to backup, i - ignore zero-blocks, O - extract fields to stdio
-            packed_manifest_file = manifest_file.replace('.txt', '.tar.gz')
-            result = Cmd.run(f'tar czf "{packed_manifest_file}" "{manifest_file}" && rm -rf "{manifest_file}"')    
-        
-        if result and result.failed:
-            raise TargetError(f"Creating manifest file to '{manifest_file}' failed: [{result.code}] {result.output}")
-        self.manifest_file = packed_manifest_file if packed_manifest_file else manifest_file
+        if format == DEFAULTS['FORMATS']['PACKAGE'] or DEFAULTS['FORMATS']['ENCRYPTED_PACKAGE']:
+            self.manifest_file = manifest_file.replace('.txt', '.tar.gz')
+            try:
+                run_cmd(f"tar czf {self.manifest_file} {manifest_file}")
+            except subprocess.CalledProcessError as e:
+                raise TargetError(f"Packing manifest to {self.manifest_file} failed: {e}: {e.stderr}")
+            
+            remove_file_or_dir(manifest_file)
+            
+            if format == DEFAULTS['FORMATS']['ENCRYPTED_PACKAGE']:
+                if encryption_key:
+                    try:
+                        run_cmd(f'/usr/bin/gpg2 --always-trust --yes --encrypt -r {encryption_key} {self.manifest_file}')
+                    except subprocess.CalledProcessError as e:
+                        raise TargetError(f"Encrypting manifest to {self.manifest_file} failed: {e}: {e.stderr}")
+                    remove_file_or_dir(self.manifest_file)
+                    self.manifest_file = f'{self.manifest_file}.gpg'
+                else:
+                    log.warning(f"Backup '{self.path}' is encrypted, but no encryption key is provided to encrypt manifest file {manifest_file}, manifest file created as package")
+        else:
+            self.manifest_file = manifest_file
         log.info(f"Manifest file created in '{self.manifest_file}'")
 
     def set_permissions(self, permissions) -> None:
@@ -379,8 +375,10 @@ class Target():
         self.max_num = None
         max_size = conf.get('max_size') or default_conf.get('max_size')
         max_num = conf.get('max_num') or default_conf.get('max_num')
-        self.files_num = None
-        self.transfer_speed = None
+        self.elapsed_time_copy = None
+        self.elapsed_time_pack = None
+        self.transfer_speed_copy = None
+        self.transfer_speed_pack = None
 
         if max_size and max_num:
             log.debug(f"Parameter 'max_size' and 'max_num' are mutually exclusive, max_num ({max_num}) will be overwritten by max_size ({max_size})")
@@ -499,17 +497,15 @@ class Target():
             self._encryption_key = value
         else:
             self._encryption_key = None
-    
-    def get_conf(self) -> dict[str, str]:  # TODO add comment to dump when variable is taken from default params
-        return vars(self)
 
     def get_backups_size(self) -> int:
         if os.path.exists(self.dest):
-            result = Cmd.run(f"du -sb '{self.dest}' | awk '{{print $1}}'")
-            if result.failed:
-                raise TargetError(f"Counting total size of backups failed: [{result.code}] {result.output}")
+            try:
+                output = run_cmd(f"du -sb '{self.dest}' | awk '{{print $1}}'", shell=True)  # TODO
+            except subprocess.CalledProcessError as e:
+                raise TargetError(f"Counting total size of backups failed: {e}: {e.stderr}")
             else:
-                return int(result.output)
+                return int(output)
         else:
             return 0
     
@@ -557,33 +553,44 @@ class Target():
     def create_backup(self, path) -> Backup:
         backup = Backup(path)
         cmd = None
-        
+                
         try:
             backup.create_manifest_file(self.format, self.encryption_key)
         except TargetError as error:
             backup.remove()
             raise TargetError(error)
         
-        if self.format == DEFAULTS['FORMATS']['PACKAGE']:
+        if self.elapsed_time_copy:  # bytes per sec
+            self.transfer_speed_copy = backup.size / self.elapsed_time_copy
+        
+        if self.format == DEFAULTS['FORMATS']['PACKAGE'] or DEFAULTS['FORMATS']['ENCRYPTED_PACKAGE']:
             new_path = f"{path}.tar.gz"
-            log.info(f"Packing backup to '{new_path}'...")
-            cmd = f'tar -g "{backup.incremental_file}" -piz -cf "{new_path}" "{path}" && rm -rf "{path}"'
-            success_msg = f"Backup successfully packed to '{new_path}' path"
-        elif self.format == DEFAULTS['FORMATS']['ENCRYPTED_PACKAGE']:
-            new_path = f"{path}.tar.gz.gpg"
-            log.info(f"Packing and encrypting backup to '{new_path}'...")
-            cmd = f'tar -g "{backup.incremental_file}" -piz -cO "{path}" | gpg2 -er "{self.encryption_key}" --always-trust > "{new_path}" && rm -rf "{path}"'
-            success_msg = f"Backup successfully packed and encrypted to '{new_path}' path" 
-        if cmd:
-            log.debug(f"Packing backup with cmd: {cmd}")
-            result = Cmd.run(cmd)
-
-            if result.failed:
-                backup.remove()
-                raise TargetError(f"Packing backup failed: [{result.code}] {result.output}")
+            if self.encryption_key:
+                log.info(f"Packing and encrypting backup to '{new_path}.gz'...")
+                cmd = f'/usr/bin/tar -piz -cO {path} | gpg2 --always-trust --yes --encrypt -r {self.encryption_key} {new_path}'
+                success_msg = f"Backup successfully packed and encrypted to '{new_path}' path" 
+                shell = True
             else:
-                log.info(success_msg)
-                backup = Backup(new_path)
+                # c - create, g - list for incremental, p - preserve permissions, 
+                # z - compress to gzip, f - file to backup, i - ignore zero-blocks, O - extract fields to stdio
+                log.info(f"Packing backup to '{new_path}'...")
+                cmd = f'/usr/bin/tar -piz -cf {new_path} {path}'
+                success_msg = f"Backup successfully packed to '{new_path}' path"
+                shell = False
+
+            log.debug(f"Packing backup with cmd: {cmd}")
+            pack_start_time = datetime.now()
+            
+            try:
+                run_cmd(cmd, shell)
+            except subprocess.CalledProcessError as e:
+                backup.remove()
+                raise TargetError(f"Packing backup failed: {e}: {e.stderr}")
+            
+            self.elapsed_time_pack = (datetime.now() - pack_start_time).seconds
+            backup.remove()
+            log.info(success_msg)
+            backup = Backup(new_path)
         else:
             log.debug(f"Backup '{path}' preserved in raw format")
             backup = Backup(path)
@@ -596,21 +603,24 @@ class Target():
             raise TargetError(f'Setting backup privileges failed: {e}')
         log.info(f"Backup finished successfully")
         self.backup = backup
+        
+        if self.elapsed_time_pack:  # bytes per sec
+            self.transfer_speed_pack = self.backup.size / self.elapsed_time_pack
         return backup
-                
+    
     def __str__(self) -> str:
         return self.name
         
     
 class PullTarget(Target):    
-    def __init__(self, name, base_dest, conf, default_conf) -> None:
+    def __init__(self, name, base_dest, conf, default_conf, show_stats) -> None:
         super().__init__(name, base_dest, conf, default_conf)
         self.sources = conf.get('sources') or default_conf.get('sources')
         self.timeout = conf.get('timeout') or default_conf.get('timeout')
         self.password_file = conf.get('password_file') or default_conf.get('password_file')
         self.exclude = conf.get('exclude') or default_conf.get('exclude')
         self.wake_on_lan = bool(conf.get('wake_on_lan'))
-        self.files_num = 0
+        self.show_stats = bool(show_stats)
         self.transfer_speed = 0  # bytes per sec
         
         if self.wake_on_lan:
@@ -671,31 +681,24 @@ class PullTarget(Target):
     def create_backup(self) -> Backup:
         new_backup_path = os.path.join(self.dest, Backup.get_today_package_name())
         
-        base_cmd = f'rsync -a --progress --info=stats2 --password-file="{self.password_file}"' # TODO --contimeout={self.timeout}
+        base_cmd = f'rsync -aW --password-file {self.password_file}' # TODO --contimeout={self.timeout}
         if self.exclude:
             exclude_args = ' '.join(f'--exclude "{exclude_arg}"' for exclude_arg in self.exclude)
             base_cmd = f'{base_cmd} {exclude_args}'
         source_args = ' '.join(source for source in self.sources)
-        cmd = f'{base_cmd} {source_args} {new_backup_path} > {os.path.join(new_backup_path, "rsync.log")}' 
+        cmd = f'{base_cmd} {source_args} {new_backup_path}' 
         os.makedirs(new_backup_path, exist_ok=True)
         log.info(f"Pulling target files to '{new_backup_path}' path...")
         log.debug(f"Used rsync cmd: {cmd}")
-        result = Cmd.run(cmd)
-
-        if result.code == 24:
-            log.warning(f"Some files vanished in source during syncing: [{result.code}] {result.output}")
-        elif result.failed:
+        try:
+            copy_start_time = datetime.now()  # TODO add showing output
+            run_cmd(cmd)  # TODO - add reaction to 24 code (some file vanished) log.warning(f"Some files vanished in source during syncing: [{result.code}] {result.output}")
+            self.elapsed_time_copy = (datetime.now() - copy_start_time).seconds
+        except subprocess.CalledProcessError as e:
             remove_file_or_dir(new_backup_path)
-            raise TargetError(f"Pulling target files failed: [{result.code}] rsync: {result.output}")
+            raise TargetError(f"Pulling target files failed: {e}: {e.stderr}")
         
         log.info(f"Backup pulled and saved in '{new_backup_path}' path")
-        
-        try:
-            rsync_log_output = Cmd.run(f"tail -n 30 {new_backup_path}/rsync.log").output
-            self.files_num = int(re.findall(r'[nN]umber\sof\sfiles:\s([0-9,]*)', rsync_log_output)[0])
-            self.transfer_speed = float(re.findall(r'bytes[\s]*?([0-9,.]*)\s?bytes/sec', rsync_log_output)[0].replace(',', ''))
-        except Exception as e:
-            log.error(f'Failed to get stats from rsync output: {e}')
         return super().create_backup(new_backup_path)
     
     def send_wol_packet(self) -> None:
@@ -752,14 +755,14 @@ class PushTarget(Target):
                 os.makedirs(new_backup_path, exist_ok=True)
                 
                 log.info(f"Moving files from '{self.work_dir}' working directory to '{new_backup_path}' path...")
-                result = Cmd.run(f'mv {self.work_dir}/* {new_backup_path}')
-                
-                if result.failed:
+                try:
+                    run_cmd(f'mv {self.work_dir}/* {new_backup_path}')
+                except subprocess.CalledProcessError as e:
                     remove_file_or_dir(new_backup_path)
-                    raise TargetError(f"Moving files from '{self.work_dir}' working directory to '{new_backup_path}' failed: [{result.code}] {result.output}")
-                else:
-                    log.info(f"Files moved from '{self.work_dir}' working directory to '{new_backup_path}' path")
-                    return super().create_backup(new_backup_path)
+                    raise TargetError(f"Moving files from '{self.work_dir}' working directory to '{new_backup_path}' failed: {e}: {e.stderr}")
+
+                log.info(f"Files moved from '{self.work_dir}' working directory to '{new_backup_path}' path")
+                return super().create_backup(new_backup_path)
             else:
                 raise TargetError(f"Not found any file to process in '{self.work_dir}' work directory")
         elif files_in_workdir:
@@ -769,9 +772,10 @@ class PushTarget(Target):
 
 
 def remove_file_or_dir(path) -> None:
-    result = Cmd.run(f"rm -rf '{path}'")
-    if result.failed:
-        raise TargetError(f"Removing '{path}' failed: [{result.code}] {result.output}")
+    try:
+        run_cmd(f"rm -rf {path}")
+    except subprocess.CalledProcessError as e:
+        raise TargetError(f"Removing '{path}' failed: {e}: {e.stderr}")
 
 def parse_args():
     parser = argparse.ArgumentParser(description='Backup script', add_help=False)
@@ -799,6 +803,11 @@ def parse_args():
                             default=False,
                             action='store_true',
                             help=f'Clean backups to 0 backups, even if limits are to small, no matter what')
+    elif action == 'run':
+        parser.add_argument('--showStats',
+                            default=False,
+                            action="store_true",
+                            help=f'Show rsync stats (Only works on pull targets)')
     parser.add_argument('-h', '--help', action='help')
     return parser.parse_args()
 
@@ -856,6 +865,11 @@ def get_logger(log_file, verbose_level) -> None:
     logging.setLogRecordFactory(record_factory)
     return logging.getLogger('backup-tool')
 
+
+def run_cmd(cmd, shell=False, check=True) -> str:
+    process = subprocess.run(cmd.split(' '), stderr=subprocess.PIPE, stdout=subprocess.PIPE, shell=shell, check=check, text=True)
+    return process.stdout or process.stderr
+
 if __name__ == "__main__":
     args = parse_args()
     
@@ -876,7 +890,7 @@ if __name__ == "__main__":
     
     nsca = Nsca(common_conf.get('nagios_host'), nagios_service, common_conf.get('nsca_host'), common_conf.get('nsca_port'))
     
-    if args.action == 'push-stats':
+    if args.action == 'push-stats':  # TODO
         influx_host = common_conf.get('influx_host')
         influx_port = common_conf.get('influx_port')    
         print(f'[{args.action.upper()}] Start pushing stats to {influx_host}:{influx_port}')
@@ -898,7 +912,7 @@ if __name__ == "__main__":
             if target_conf.get('type') == DEFAULTS['BACKUP_TYPES']['PUSH']:
                 target = PushTarget(target, common_conf.get('base_dest'), common_conf.get('work_dir'), target_conf, conf.get('default'))
             else:
-                target = PullTarget(target, common_conf.get('base_dest'), target_conf, conf.get('default'))
+                target = PullTarget(target, common_conf.get('base_dest'), target_conf, conf.get('default'), args.showStats)
             
             log.info(f'[{args.action.upper()}] Start processing target')
 
@@ -906,7 +920,7 @@ if __name__ == "__main__":
                 if type(target) == PullTarget and target.wake_on_lan: 
                     target.send_wol_packet()
                 target.create_backup()
-                state.set_target_status(target, f'({target.backup.display_size}) {target.backup.path}', NAGIOS['OK'], target.files_num, target.transfer_speed)
+                state.set_target_status(target, f'({target.backup.display_size}) {target.backup.path}', NAGIOS['OK'], target.elapsed_time_copy, target.elapsed_time_pack, target.transfer_speed_copy, target.transfer_speed_pack)
             elif args.action == 'cleanup':
                 total_recovered_space = 0
                 total_removed_backups = 0
