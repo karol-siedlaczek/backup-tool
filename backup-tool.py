@@ -19,6 +19,7 @@ import logging
 DEFAULTS = {
     'LOG_LEVEL': 1,
     'CONFIG_FILE': 'backup-tool.yaml',
+    'SCRIPTS_PATH': '/etc/backup-tool/scripts',
     'REQUIRED_COMMON_PARAMS': ['nsca_host', 'nsca_port', 'nagios_host', 'nagios_backup_service', 'nagios_cleanup_service', 'base_dest', 'log_file', 'hosts_file', 'backup_state_file', 'cleanup_state_file', 'work_dir'],
     'FORMATS': {
         'PACKAGE': 'package',
@@ -37,6 +38,10 @@ NAGIOS = {
     'CRITICAL': 2,
     'UNKNOWN': 3
 }
+
+
+                # c - create, g - list for incremental, p - preserve permissions, 
+                # z - compress to gzip, f - file to backup, i - ignore zero-blocks, O - extract fields to stdio
 
 class TargetException(Exception):
     __slots__ = ['code']
@@ -263,35 +268,35 @@ class Backup():
                 return None
     
     def create_manifest_file(self, format, encryption_key=None) -> None:
-        manifest_file = os.path.join(self.directory, 'manifests', f'manifest-{self.display_date}.txt')
-        os.makedirs(os.path.join(self.directory, 'manifests'), exist_ok=True)
+        manifest_file = f'manifest-{self.display_date}.txt'
+        manifests_dir = os.path.join(self.directory, 'manifests')
+        os.makedirs(manifests_dir, exist_ok=True)
+        old_cwd = os.getcwd()
+        os.chdir(manifests_dir)
+        
         try:
             with open(manifest_file, 'w') as f:
                 f.writelines(run_cmd(f'/usr/bin/find {self.path} -printf %AF-%AT\t%s\t%p\n'))
         except subprocess.CalledProcessError as e:
             raise TargetError(f"Getting content to manifest file from '{self.path}' failed: {e}: {e.stderr}")
-        
+
         if format == DEFAULTS['FORMATS']['PACKAGE'] or DEFAULTS['FORMATS']['ENCRYPTED_PACKAGE']:
             self.manifest_file = manifest_file.replace('.txt', '.tar.gz')
-            try:
-                run_cmd(f"tar czf {self.manifest_file} {manifest_file}")
-            except subprocess.CalledProcessError as e:
-                raise TargetError(f"Packing manifest to {self.manifest_file} failed: {e}: {e.stderr}")
             
+            if encryption_key:
+                try:
+                    self.manifest_file = run_cmd(f"{DEFAULTS['SCRIPTS_PATH']}/pack_and_encrypt.sh {manifest_file} {encryption_key} {self.manifest_file}")
+                except subprocess.CalledProcessError as e:
+                    raise TargetError(f"Packing and encrypting manifest to {self.manifest_file} failed: {e}: {e.stderr}")
+            else:
+                try:
+                    run_cmd(f"tar czf {self.manifest_file} {manifest_file}")
+                except subprocess.CalledProcessError as e:
+                    raise TargetError(f"Packing manifest to {self.manifest_file} failed: {e}: {e.stderr}")
             remove_file_or_dir(manifest_file)
-            
-            if format == DEFAULTS['FORMATS']['ENCRYPTED_PACKAGE']:
-                if encryption_key:
-                    try:
-                        run_cmd(f'/usr/bin/gpg2 --always-trust --yes --encrypt -r {encryption_key} {self.manifest_file}')
-                    except subprocess.CalledProcessError as e:
-                        raise TargetError(f"Encrypting manifest to {self.manifest_file} failed: {e}: {e.stderr}")
-                    remove_file_or_dir(self.manifest_file)
-                    self.manifest_file = f'{self.manifest_file}.gpg'
-                else:
-                    log.warning(f"Backup '{self.path}' is encrypted, but no encryption key is provided to encrypt manifest file {manifest_file}, manifest file created as package")
         else:
             self.manifest_file = manifest_file
+        os.chdir(old_cwd)
         log.info(f"Manifest file created in '{self.manifest_file}'")
 
     def set_permissions(self, permissions) -> None:
@@ -552,8 +557,8 @@ class Target():
         
     def create_backup(self, path) -> Backup:
         backup = Backup(path)
-        cmd = None
-                
+        backup.set_permissions(self.permissions)
+         
         try:
             backup.create_manifest_file(self.format, self.encryption_key)
         except TargetError as error:
@@ -564,33 +569,32 @@ class Target():
             self.transfer_speed_copy = backup.size / self.elapsed_time_copy
         
         if self.format == DEFAULTS['FORMATS']['PACKAGE'] or DEFAULTS['FORMATS']['ENCRYPTED_PACKAGE']:
-            new_path = f"{path}.tar.gz"
-            if self.encryption_key:
-                log.info(f"Packing and encrypting backup to '{new_path}.gz'...")
-                cmd = f'/usr/bin/tar -piz -cO {path} | gpg2 --always-trust --yes --encrypt -r {self.encryption_key} {new_path}'
-                success_msg = f"Backup successfully packed and encrypted to '{new_path}' path" 
-                shell = True
-            else:
-                # c - create, g - list for incremental, p - preserve permissions, 
-                # z - compress to gzip, f - file to backup, i - ignore zero-blocks, O - extract fields to stdio
-                log.info(f"Packing backup to '{new_path}'...")
-                cmd = f'/usr/bin/tar -piz -cf {new_path} {path}'
-                success_msg = f"Backup successfully packed to '{new_path}' path"
-                shell = False
-
-            log.debug(f"Packing backup with cmd: {cmd}")
             pack_start_time = datetime.now()
+            old_cwd = os.getcwd()
+            os.chdir(backup.directory)
+            new_package = f"{backup.package}.tar.gz"
             
-            try:
-                run_cmd(cmd, shell)
-            except subprocess.CalledProcessError as e:
-                backup.remove()
-                raise TargetError(f"Packing backup failed: {e}: {e.stderr}")
-            
+            if self.encryption_key:
+                log.info(f"Packing and encrypting backup to '{new_package}.gpg'...")
+                try:
+                    new_package = run_cmd(f"{DEFAULTS['SCRIPTS_PATH']}/pack_and_encrypt.sh {backup.package} {self.encryption_key} {new_package}")
+                except subprocess.CalledProcessError as e:
+                    backup.remove()
+                    raise TargetError(f"Packing and encrypting backup failed: {e}: {e.stderr}")
+                log.info(f"Backup successfully packed and encrypted to '{new_package}' path")
+            else:
+                log.info(f"Packing backup to '{new_package}'...")
+                try:
+                    run_cmd(f'tar -piz -cf {new_package} {backup.package}')
+                except subprocess.CalledProcessError as e:
+                    backup.remove()
+                    raise TargetError(f"Packing backup failed: {e}: {e.stderr}")
+                log.info(f"Backup successfully packed to '{new_package}' path")
+
             self.elapsed_time_pack = (datetime.now() - pack_start_time).seconds
             backup.remove()
-            log.info(success_msg)
-            backup = Backup(new_path)
+            backup = Backup(os.path.join(backup.directory, new_package))
+            os.chdir(old_cwd)
         else:
             log.debug(f"Backup '{path}' preserved in raw format")
             backup = Backup(path)
@@ -613,14 +617,13 @@ class Target():
         
     
 class PullTarget(Target):    
-    def __init__(self, name, base_dest, conf, default_conf, show_stats) -> None:
+    def __init__(self, name, base_dest, conf, default_conf) -> None:
         super().__init__(name, base_dest, conf, default_conf)
         self.sources = conf.get('sources') or default_conf.get('sources')
         self.timeout = conf.get('timeout') or default_conf.get('timeout')
         self.password_file = conf.get('password_file') or default_conf.get('password_file')
         self.exclude = conf.get('exclude') or default_conf.get('exclude')
         self.wake_on_lan = bool(conf.get('wake_on_lan'))
-        self.show_stats = bool(show_stats)
         self.transfer_speed = 0  # bytes per sec
         
         if self.wake_on_lan:
@@ -695,7 +698,6 @@ class PullTarget(Target):
             run_cmd(cmd)  # TODO - add reaction to 24 code (some file vanished) log.warning(f"Some files vanished in source during syncing: [{result.code}] {result.output}")
             self.elapsed_time_copy = (datetime.now() - copy_start_time).seconds
         except subprocess.CalledProcessError as e:
-            remove_file_or_dir(new_backup_path)
             raise TargetError(f"Pulling target files failed: {e}: {e.stderr}")
         
         log.info(f"Backup pulled and saved in '{new_backup_path}' path")
@@ -803,11 +805,6 @@ def parse_args():
                             default=False,
                             action='store_true',
                             help=f'Clean backups to 0 backups, even if limits are to small, no matter what')
-    elif action == 'run':
-        parser.add_argument('--showStats',
-                            default=False,
-                            action="store_true",
-                            help=f'Show rsync stats (Only works on pull targets)')
     parser.add_argument('-h', '--help', action='help')
     return parser.parse_args()
 
@@ -912,7 +909,7 @@ if __name__ == "__main__":
             if target_conf.get('type') == DEFAULTS['BACKUP_TYPES']['PUSH']:
                 target = PushTarget(target, common_conf.get('base_dest'), common_conf.get('work_dir'), target_conf, conf.get('default'))
             else:
-                target = PullTarget(target, common_conf.get('base_dest'), target_conf, conf.get('default'), args.showStats)
+                target = PullTarget(target, common_conf.get('base_dest'), target_conf, conf.get('default'))
             
             log.info(f'[{args.action.upper()}] Start processing target')
 
