@@ -8,6 +8,7 @@ import grp
 import yaml
 import math
 import argparse
+from enum import Enum, auto
 from glob import glob
 from influxdb import InfluxDBClient
 from inspect import isclass
@@ -16,32 +17,83 @@ from wakeonlan import send_magic_packet
 import subprocess
 import logging
 
-DEFAULTS = {
-    'LOG_LEVEL': 1,
-    'CONFIG_FILE': 'backup-tool.yaml',
-    'SCRIPTS_PATH': '/etc/backup-tool/scripts',
-    'REQUIRED_COMMON_PARAMS': ['nsca_host', 'nsca_port', 'nagios_host', 'nagios_backup_service', 'nagios_cleanup_service', 'base_dest', 'log_file', 'hosts_file', 'backup_state_file', 'cleanup_state_file', 'work_dir'],
-    'FORMATS': {
-        'PACKAGE': 'package',
-        'ENCRYPTED_PACKAGE': 'encrypted_package',
-        'RAW': 'raw'
-    },
-    'BACKUP_TYPES': {
-        'PUSH': 'push',
-        'PULL': 'pull'
-    }
-}
+CONFIG_FILE = 'backup-tool.yaml'
+# TODO
+# c - create, g - list for incremental, p - preserve permissions, 
+# z - compress to gzip, f - file to backup, i - ignore zero-blocks, O - extract fields to stdio
 
-NAGIOS = {
-    'OK': 0,
-    'WARNING': 1,
-    'CRITICAL': 2,
-    'UNKNOWN': 3
-}
+class Defaults(Enum):
+    @staticmethod
+    def list(enum_class=None) -> list:
+        class_name = enum_class or Defaults
+        return [ name.lower() for name, member in class_name.__members__.items() ]
+    
+    def __str__(self) -> str:
+        return self.name.lower() if isinstance(self.name, str) else self.name
+    
+    @classmethod
+    def _missing_(cls, value):
+        value = value.lower()
+        for member in cls:
+            if member.value == value:
+                return member
+        return None
+    
+    # def __repr__(self) -> str:
+    #     return self.__str__()
+    
+class RequiredCommonParams(Defaults):
+    NAGIOS = ['host', 'port', 'host_service', 'run_service', 'cleanup_service']
+    INFLUX = ['host', 'port', 'user', 'database', 'password_file']
+    FILES = ['log', 'hosts', 'run_state', 'cleanup_state']
+    DIRS = ['backups', 'work', 'scripts']
+    
+    @staticmethod
+    def validate(commons) -> None:
+        try:
+            if not commons:
+                raise EnvironmentError("section 'common' is not defined")
+            for parent_param in list(RequiredCommonParams):
+                parent_attr = commons.get(str(parent_param))
+                if not parent_attr:
+                    raise EnvironmentError(f"parameter 'common.{parent_param}' is not defined")
+                for child_param in parent_param.value:
+                    child_attr = parent_attr.get(str(child_param))
+                    if not child_attr:
+                        raise EnvironmentError(f"parameter 'common.{parent_param}.{child_param}' is not defined")
+        except EnvironmentError as e:
+            print(f"File '{CONFIG_FILE}' is not valid config: {e}")
+            sys.exit(Nagios.UNKNOWN)
 
+class BackupType(Defaults):
+    PUSH = 'push'
+    PULL = 'pull'
 
-                # c - create, g - list for incremental, p - preserve permissions, 
-                # z - compress to gzip, f - file to backup, i - ignore zero-blocks, O - extract fields to stdio
+class Format(Defaults):
+    PACKAGE = 'package'
+    ENCRYPTED_PACKAGE = 'encrypted-package'
+    RAW = 'raw'
+    
+class Action(Defaults):
+    CLEANUP = 'cleanup'
+    RUN = 'run'
+    PUSH_STATS = 'push-stats'
+
+class Nagios(str, Enum):
+    OK = 0
+    WARNING = 1
+    CRITICAL = 2
+    UNKNOWN = 3
+    
+    def __str__(self) -> str:
+        return self
+    
+    @staticmethod
+    def get_status_by_code(code):
+        for nagios_item in Nagios:
+            if int(nagios_item.value) == int(code): return nagios_item.name
+        return Nagios.UNKNOWN.name
+
 
 class TargetException(Exception):
     __slots__ = ['code']
@@ -49,32 +101,33 @@ class TargetException(Exception):
     def __init__(self, code) -> None:
         self.code = code
 
-
 class TargetError(TargetException):
     def __init__(self, msg) -> None:
-        super().__init__(NAGIOS['CRITICAL'])
+        super().__init__(Nagios.CRITICAL)
         log.error(msg)
-
 
 class TargetWarning(TargetException):
     def __init__(self, msg) -> None:
-        super().__init__(NAGIOS['WARNING'])
+        super().__init__(Nagios.WARNING)
         log.warning(msg)
-
 
 class TargetSkipException(TargetException):
     def __init__(self, msg) -> None:
-        super().__init__(NAGIOS['OK'])
+        super().__init__(Nagios.OK)
         log.info(msg)
-
 
 class TargetCleanupError(TargetException):
     def __init__(self, msg) -> None:
-        super().__init__(NAGIOS['CRITICAL'])
+        super().__init__(Nagios.CRITICAL)
         log.error(msg)
 
+class TargetCleanupSkipException(TargetException):  # TODO - currently not used
+    def __init__(self, msg) -> None:
+        super().__init__(Nagios.OK)
+        log.info(msg)
 
-class Influx():  # TODO - Setup pushing stats to influx
+    
+class InfluxServer():  # TODO - Setup pushing stats to influx
     __slots__ = ['client']
     
     def __init__(self, host, port, user, password_file, database) -> None:
@@ -85,32 +138,29 @@ class Influx():  # TODO - Setup pushing stats to influx
         with open(password_file, 'r') as f:
             password = f.read().strip()
         self.client = InfluxDBClient(host, port, user, password, database)
-        self.client.ping()
-            
-
-class Nsca():
-    __slots__ = ['bin', 'nagios_hosts', 'nagios_host', 'nagios_service', 'host', 'port']
+        self.client.ping()  
     
-    def __init__(self, nagios_host, nagios_service, host, port) -> None:
+class NagiosServer():
+    __slots__ = ['bin', 'host', 'port', 'host_service', 'service']
+    
+    def __init__(self, host, port, host_service, service) -> None:
         self.bin = '/usr/sbin/send_nsca'
-        self.nagios_host = nagios_host
-        self.nagios_service = nagios_service
         self.host = host
         self.port = port
+        self.host_service = host_service
+        self.service = service
     
     def send_report_to_nagios(self, code, msg) -> None:
         try:
-            run_cmd(f"echo -e '{self.nagios_host}\t{self.nagios_service}\t{code}\t{msg}' | {self.bin} -H {self.host} -p {self.port}", True)
+            msg = f'{self.host_service}\t{self.service}\t{code}\t{msg}'
+            run_cmd(f"echo -e '{msg}' | {self.bin} -H {self.host} -p {self.port}", True)
+            log.debug(f"Nsca packet '{msg}' sent to {self.host}:{self.port}")
         except subprocess.CalledProcessError as e:
             raise ConnectionError(f"Sending nsca packet to {self.host}:{self.port} failed: {e}: {e.stderr}")
-            
-        
-    @staticmethod
-    def get_status_by_code(code) -> str:
-        for nagios_status, nagios_code in NAGIOS.items():
-            if code == nagios_code: return nagios_status
-        return 'UNKNOWN'
-  
+    
+    def __str__(self) -> str:
+        return self.name
+           
            
 class State():
     __slots__ = ['state_file', 'state']
@@ -139,9 +189,9 @@ class State():
         curr_status = self.state[str(target_name)]['status']
         print(f'[{target_name}] {curr_status}: {msg}')
         
-        if curr_status == 'CRITICAL':
+        if curr_status == Nagios.CRITICAL.name:
             log.error(msg)
-        elif curr_status == 'WARNING':
+        elif curr_status == Nagios.WARNING.name:
             log.warning(msg)
         else:
             log.info(msg)
@@ -160,7 +210,7 @@ class State():
         
         for target_state in self.state.values():
             status = target_state.get('status')
-            if int(NAGIOS[status]) > int(NAGIOS[most_failure_status]):
+            if int(getattr(Nagios, status)) > int(getattr(Nagios, most_failure_status)):
                 most_failure_status = status
         return most_failure_status
     
@@ -168,26 +218,26 @@ class State():
         summary = ''
         
         for target, target_state in self.state.items():
-            summary += f"{target_state.get('status')}: [{target}] {target_state.get('msg')}</br>"
+            summary += f"{target_state.get('status')}: [{target}] {target_state.get('msg')} ({target_state.get('timestamp')})</br>"
         return summary
 
-
-class BackupState(State):
+class RunState(State):
     def __init__(self, state_file) -> None:
         super().__init__(state_file)
     
     def set_target_status(self, target_name, msg, code, elapsed_time_copy=None, elapsed_time_pack=None, transfer_speed_copy=None, transfer_speed_pack=None) -> None:
         new_state = self.state
         new_state[str(target_name)] = {
-            'code': code,
-            'status': Nsca.get_status_by_code(code),
-            'time': {
+            'timestamp': datetime.now(),
+            'code': int(code),
+            'status': Nagios.get_status_by_code(code),
+            'times': {
                 'copy': {
                     'duration': elapsed_time_copy,
                     'transfer_speed': transfer_speed_copy
                 },
                 'pack': {
-                    'duration': elapsed_time_copy,
+                    'duration': elapsed_time_pack,
                     'transfer_speed': transfer_speed_pack
                 }
             },
@@ -202,8 +252,9 @@ class CleanupState(State):
     def set_target_status(self, target_name, msg, code, recovered_space=None, removed_backups=None, total_size=None, max_size=None, max_num=None) -> None:
         new_state = self.state
         new_state[str(target_name)] = {
-            'code': code,
-            'status': Nsca.get_status_by_code(code),
+            'timestamp': datetime.now(),
+            'code': int(code),
+            'status': Nagios.get_status_by_code(code),
             'recovered_space': recovered_space,
             'removed_backups': removed_backups,
             'total_size': total_size,
@@ -237,10 +288,6 @@ class Backup():
     def display_date(self) -> str:
         return self.date.strftime(Backup.DATE_FORMAT)
     
-    @property
-    def display_size(self) -> str:
-        return get_display_size(self.size)
-    
     def __is_valid_backup(self) -> bool:  # Matches only filenames created by backup tool
         regex = r'^backup-[\d]{4}-[\d]{2}-[\d]{2}_[\d]{2}-[\d]{2}|\.tar\.gz|\.gpg$'
         return bool(re.match(regex, self.package))
@@ -254,7 +301,7 @@ class Backup():
                 files_to_delete.append(manifest_file)
             for file_to_delete in files_to_delete:
                 remove_file_or_dir(file_to_delete)
-            log.info(f"Backup '{self}' deleted [{self.display_size}]")
+            log.info(f"Backup '{self}' deleted [{get_display_size(self.size)}]")
         except PermissionError as error:
             raise TargetError(f"Cannot delete backup '{self}', reason: {error}")
     
@@ -267,7 +314,7 @@ class Backup():
             except IndexError:
                 return None
     
-    def create_manifest_file(self, format, encryption_key=None) -> None:
+    def create_manifest_file(self, format, scripts_dir, encryption_key=None) -> None:
         manifest_file = f'manifest-{self.display_date}.txt'
         manifests_dir = os.path.join(self.directory, 'manifests')
         os.makedirs(manifests_dir, exist_ok=True)
@@ -280,12 +327,12 @@ class Backup():
         except subprocess.CalledProcessError as e:
             raise TargetError(f"Getting content to manifest file from '{self.path}' failed: {e}: {e.stderr}")
 
-        if format == DEFAULTS['FORMATS']['PACKAGE'] or DEFAULTS['FORMATS']['ENCRYPTED_PACKAGE']:
+        if format == Format.PACKAGE.value or format == Format.ENCRYPTED_PACKAGE.value:
             self.manifest_file = manifest_file.replace('.txt', '.tar.gz')
             
             if encryption_key:
                 try:
-                    self.manifest_file = run_cmd(f"{DEFAULTS['SCRIPTS_PATH']}/pack_and_encrypt.sh {manifest_file} {encryption_key} {self.manifest_file}")
+                    self.manifest_file = run_cmd(f"{scripts_dir}/pack_and_encrypt.sh {manifest_file} {encryption_key} {self.manifest_file}")
                 except subprocess.CalledProcessError as e:
                     raise TargetError(f"Packing and encrypting manifest to {self.manifest_file} failed: {e}: {e.stderr}")
             else:
@@ -358,6 +405,14 @@ class TargetValidator():
         if not match:
             raise TargetError(f"Parameter '{param}' with '{dir_path}' path is not valid absolute path to directory")
         return match
+
+    @staticmethod
+    def validate_file_path(param=None, file_path=None, custom_msg=None):
+        regex = r'^([/[a-z+*|[a-zA-Z0-9]+\.[a-zA-Z0-9]+)$'
+        match = re.fullmatch(regex, file_path)
+        if not match:
+            raise TargetError(custom_msg or f"Parameter '{param}' with '{file_path}' path is not valid path to file")
+        return match
     
     @staticmethod 
     def validate_file_exist(param, file_path) -> None:
@@ -369,13 +424,13 @@ class TargetValidator():
         if value not in allowed_values:
             raise TargetError(f"Parameter '{param}' has invalid '{value}' value, possible choices: {allowed_values}")
 
-    
 class Target():    
-    def __init__(self, name, base_dest, conf, default_conf) -> None:
+    def __init__(self, name, base_dest, conf, default_conf, scripts_dir) -> None:
         self.name = name
         self.backup = None
         self.type = conf.get('type')
         self.dest = os.path.join(base_dest, conf.get('dest')) if conf.get('dest') else os.path.join(base_dest, self.name)
+        self.scripts_dir = scripts_dir
         self.max_size = None
         self.max_num = None
         max_size = conf.get('max_size') or default_conf.get('max_size')
@@ -439,7 +494,7 @@ class Target():
     @type.setter
     def type(self, value) -> str:
         TargetValidator.validate_required_param('type', value)
-        TargetValidator.validate_allowed_values('type', value, DEFAULTS['BACKUP_TYPES'].values())
+        TargetValidator.validate_allowed_values('type', value, Defaults.list(BackupType))
         self._type = value
         
     @dest.setter
@@ -479,7 +534,7 @@ class Target():
     @format.setter
     def format(self, value) -> str:
         TargetValidator.validate_required_param('format', value)
-        TargetValidator.validate_allowed_values('format', value, DEFAULTS['FORMATS'].values())
+        TargetValidator.validate_allowed_values('format', value, Defaults.list(Format))
         self._format = value
     
     @owner.setter
@@ -496,7 +551,7 @@ class Target():
     
     @encryption_key.setter
     def encryption_key(self, value) -> str:
-        if self.format == DEFAULTS['FORMATS']['ENCRYPTED_PACKAGE']:
+        if self.format == Format.ENCRYPTED_PACKAGE.value:
             TargetValidator.validate_required_param('encryption_key', value)
             TargetValidator.validate_type('encryption_key', str, value)
             self._encryption_key = value
@@ -560,15 +615,15 @@ class Target():
         backup.set_permissions(self.permissions)
          
         try:
-            backup.create_manifest_file(self.format, self.encryption_key)
+            backup.create_manifest_file(self.format, self.scripts_dir, self.encryption_key)
         except TargetError as error:
             backup.remove()
             raise TargetError(error)
         
         if self.elapsed_time_copy:  # bytes per sec
             self.transfer_speed_copy = backup.size / self.elapsed_time_copy
-        
-        if self.format == DEFAULTS['FORMATS']['PACKAGE'] or DEFAULTS['FORMATS']['ENCRYPTED_PACKAGE']:
+
+        if self.format == Format.PACKAGE.value or self.format == Format.ENCRYPTED_PACKAGE.value:
             pack_start_time = datetime.now()
             old_cwd = os.getcwd()
             os.chdir(backup.directory)
@@ -577,7 +632,7 @@ class Target():
             if self.encryption_key:
                 log.info(f"Packing and encrypting backup to '{new_package}.gpg'...")
                 try:
-                    new_package = run_cmd(f"{DEFAULTS['SCRIPTS_PATH']}/pack_and_encrypt.sh {backup.package} {self.encryption_key} {new_package}")
+                    new_package = run_cmd(f"{self.scripts_dir}/pack_and_encrypt.sh {backup.package} {self.encryption_key} {new_package}")
                 except subprocess.CalledProcessError as e:
                     backup.remove()
                     raise TargetError(f"Packing and encrypting backup failed: {e}: {e.stderr}")
@@ -591,7 +646,7 @@ class Target():
                     raise TargetError(f"Packing backup failed: {e}: {e.stderr}")
                 log.info(f"Backup successfully packed to '{new_package}' path")
 
-            self.elapsed_time_pack = (datetime.now() - pack_start_time).seconds
+            self.elapsed_time_pack = (datetime.now() - pack_start_time).microseconds
             backup.remove()
             backup = Backup(os.path.join(backup.directory, new_package))
             os.chdir(old_cwd)
@@ -615,16 +670,15 @@ class Target():
     def __str__(self) -> str:
         return self.name
         
-    
 class PullTarget(Target):    
-    def __init__(self, name, base_dest, conf, default_conf) -> None:
-        super().__init__(name, base_dest, conf, default_conf)
+    def __init__(self, name, conf, default_conf, base_dest, scripts_dir, stats_file) -> None:
+        super().__init__(name, base_dest, conf, default_conf, scripts_dir)
         self.sources = conf.get('sources') or default_conf.get('sources')
         self.timeout = conf.get('timeout') or default_conf.get('timeout')
         self.password_file = conf.get('password_file') or default_conf.get('password_file')
         self.exclude = conf.get('exclude') or default_conf.get('exclude')
         self.wake_on_lan = bool(conf.get('wake_on_lan'))
-        self.transfer_speed = 0  # bytes per sec
+        self.stats_file = stats_file        
         
         if self.wake_on_lan:
             self._mac_address = conf.get('wake_on_lan').get('mac_address')
@@ -648,6 +702,10 @@ class PullTarget(Target):
     @property
     def mac_address(self) -> str:
         return self._mac_address
+    
+    @property
+    def stats_file(self) -> str:
+        return self._stats_file
     
     @sources.setter
     def sources(self, value) -> None:
@@ -680,25 +738,41 @@ class PullTarget(Target):
         TargetException.validate_required_param('mac_address', value)  # Only required when wake_on_lan is True
         TargetException.validate_match('mac_address', r'^([0-9A-Fa-f]{2}[:-]){5}([0-9A-Fa-f]{2})$', value, 'is not valid MAC address')
         self._mac_address = value
+    
+    @stats_file.setter
+    def stats_file(self, value) -> None:
+        if value:
+            TargetValidator.validate_file_path(file_path=value, custom_msg=f"Path to stats file '{value}' defined with --statsFile is not valid file path")
+            self._stats_file = value
+        else:
+            self._stats_file = None
         
     def create_backup(self) -> Backup:
         new_backup_path = os.path.join(self.dest, Backup.get_today_package_name())
+        base_cmd = f'rsync -aW --contimeout {self.timeout} --password-file {self.password_file}'
         
-        base_cmd = f'rsync -aW --password-file {self.password_file}' # TODO --contimeout={self.timeout}
+        if self.stats_file:
+            base_cmd += " --stats --info=name1,progress2"
         if self.exclude:
             exclude_args = ' '.join(f'--exclude "{exclude_arg}"' for exclude_arg in self.exclude)
             base_cmd = f'{base_cmd} {exclude_args}'
+        
         source_args = ' '.join(source for source in self.sources)
         cmd = f'{base_cmd} {source_args} {new_backup_path}' 
         os.makedirs(new_backup_path, exist_ok=True)
         log.info(f"Pulling target files to '{new_backup_path}' path...")
         log.debug(f"Used rsync cmd: {cmd}")
+        
         try:
-            copy_start_time = datetime.now()  # TODO add showing output
-            run_cmd(cmd)  # TODO - add reaction to 24 code (some file vanished) log.warning(f"Some files vanished in source during syncing: [{result.code}] {result.output}")
-            self.elapsed_time_copy = (datetime.now() - copy_start_time).seconds
+            copy_start_time = datetime.now()
+            result = run_cmd(cmd)  # TODO - add reaction to 24 code (some file vanished) log.warning(f"Some files vanished in source during syncing: [{result.code}] {result.output}")
+            self.elapsed_time_copy = (datetime.now() - copy_start_time).microseconds
         except subprocess.CalledProcessError as e:
             raise TargetError(f"Pulling target files failed: {e}: {e.stderr}")
+        
+        if self.stats_file:
+            with open(self.stats_file, 'w') as f:
+                f.writelines(result)
         
         log.info(f"Backup pulled and saved in '{new_backup_path}' path")
         return super().create_backup(new_backup_path)
@@ -707,10 +781,9 @@ class PullTarget(Target):
         send_magic_packet(self.mac_address)
         log.debug(f'WOL packet sent to {self.mac_address}')
         
-
 class PushTarget(Target):    
-    def __init__(self, name, base_dest, work_dir, conf, default_conf) -> None:
-        super().__init__(name, base_dest, conf, default_conf)
+    def __init__(self, name, conf, default_conf, base_dest, scripts_dir, work_dir) -> None:
+        super().__init__(name, base_dest, conf, default_conf, scripts_dir)
         self.work_dir = os.path.join(work_dir, self.name)
         self.frequency = conf.get('frequency') or default_conf.get('frequency')
     
@@ -781,17 +854,17 @@ def remove_file_or_dir(path) -> None:
 
 def parse_args():
     parser = argparse.ArgumentParser(description='Backup script', add_help=False)
-    parser.add_argument('action', choices=['cleanup', 'run', 'push-stats'])
+    parser.add_argument('action', choices=Defaults.list(Action))
     action = parser.parse_known_args()[0].action
     parser.add_argument('-v', '--verbose', 
                         action='count', 
-                        default=DEFAULTS['LOG_LEVEL'],
-                        help=f'Default verbose level is {DEFAULTS["LOG_LEVEL"]}')
+                        default=1,
+                        help=f'Default verbose level is 1 (INFO)')
     if action != 'push-stats':
         parser.add_argument('-t', '--targets',
                             required=True,
                             nargs='+',
-                            help=f'Target list defined in {DEFAULTS["CONFIG_FILE"]} configuration file under "targets" markup')
+                            help=f'Target list defined in {CONFIG_FILE} configuration file under "targets" markup')
         parser.add_argument('-m', '--mode',
                             default='full',
                             choices=['full', 'inc'],
@@ -799,12 +872,16 @@ def parse_args():
         parser.add_argument('--noReport',
                             default=False,
                             action='store_true',
-                            help=f'Disable sending state of this iteration to NSCA server defined in {DEFAULTS["CONFIG_FILE"]}')
+                            help=f'Disable sending state of this iteration to NSCA server defined in {CONFIG_FILE}')
     if action == 'cleanup':
         parser.add_argument('--force',
                             default=False,
                             action='store_true',
                             help=f'Clean backups to 0 backups, even if limits are to small, no matter what')
+    elif action == 'run':
+        parser.add_argument('--statsFile',
+                            type=str,
+                            help=f'Redirect rsync logs to file pointed by this argument')
     parser.add_argument('-h', '--help', action='help')
     return parser.parse_args()
 
@@ -834,17 +911,6 @@ def format_hours_to_ago(hours_amount) -> str:
         else:
             return f"{days} days and {hours} hours" if hours != 1 else f"{days} days and 1 hour"
 
-def validate_conf_commons(commons) -> None:
-    try:
-        if not commons:
-            raise EnvironmentError("key 'common' is not defined")
-        for param in DEFAULTS['REQUIRED_COMMON_PARAMS']:
-            if not commons.get(param):
-                raise EnvironmentError(f"parameter '{param}' is missing in 'common' key")
-    except EnvironmentError as error:
-        print(f"File '{DEFAULTS['CONFIG_FILE']}' is not valid config: {error}")
-        sys.exit(NAGIOS['UNKNOWN'])
-
 def get_logger(log_file, verbose_level) -> None:
     def record_factory(*args, **kwargs) -> logging.LogRecord:
         record = old_factory(*args, **kwargs)
@@ -862,7 +928,6 @@ def get_logger(log_file, verbose_level) -> None:
     logging.setLogRecordFactory(record_factory)
     return logging.getLogger('backup-tool')
 
-
 def run_cmd(cmd, shell=False, check=True) -> str:
     process = subprocess.run(cmd.split(' '), stderr=subprocess.PIPE, stdout=subprocess.PIPE, shell=shell, check=check, text=True)
     return process.stdout or process.stderr
@@ -870,62 +935,62 @@ def run_cmd(cmd, shell=False, check=True) -> str:
 if __name__ == "__main__":
     args = parse_args()
     
-    with open(DEFAULTS['CONFIG_FILE'], "r") as f:
+    with open(CONFIG_FILE, "r") as f:
         conf = yaml.safe_load(f)
-        
     common_conf = conf.get('common')
-    validate_conf_commons(common_conf)
-    log = get_logger(common_conf.get('log_file'), args.verbose)
+    RequiredCommonParams.validate(common_conf)
+    log = get_logger(common_conf['files']['log'], args.verbose)
+    catch_exception_class = TargetException if args.verbose > 1 else Exception
     target = '-'
     
     if args.action == 'cleanup':
-        state = CleanupState(common_conf.get('cleanup_state_file'))
-        nagios_service = common_conf.get('nagios_cleanup_service')
+        state = CleanupState(common_conf['files']['cleanup_state'])
+        nagios_service = common_conf['nagios']['cleanup_service']
     else:
-        state = BackupState(common_conf.get('backup_state_file'))
-        nagios_service = common_conf.get('nagios_backup_service')
+        state = RunState(common_conf['files']['run_state'])
+        nagios_service = common_conf['nagios']['run_service']
     
-    nsca = Nsca(common_conf.get('nagios_host'), nagios_service, common_conf.get('nsca_host'), common_conf.get('nsca_port'))
+    nagios = NagiosServer(common_conf['nagios']['host'], common_conf['nagios']['port'], common_conf['nagios']['host_service'], nagios_service)
     
-    if args.action == 'push-stats':  # TODO
-        influx_host = common_conf.get('influx_host')
-        influx_port = common_conf.get('influx_port')    
+    if args.action == Action.PUSH_STATS.value:  # TODO
+        influx_host = common_conf['influx']['host']
+        influx_port = common_conf['influx']['port']   
         print(f'[{args.action.upper()}] Start pushing stats to {influx_host}:{influx_port}')
         log.info(f'[{args.action.upper()}] Start pushing stats to {influx_host}:{influx_port}')
         try:
-            influxdb = Influx(influx_host, influx_port, common_conf.get('influx_user'), common_conf.get('influx_password_file'), common_conf.get('influx_database'))
+            influxdb = InfluxServer(influx_host, influx_port, common_conf['influx']['user'], common_conf['influx']['password_file'], common_conf['influx']['database'])
         except (OSError, FileNotFoundError, ConnectionError) as e:
             print(f"ERROR: Connection to influx server failed: {e}")
             log.error(f"ERROR: Connection to influx server failed: {e}")
-            sys.exit(1)
-        sys.exit(0)
+            sys.exit(Nagios.WARNING)
+        sys.exit(Nagios.OK)
         
     for target in args.targets:
         try:
             target_conf = conf['targets'].get(target)
             if not target_conf: 
-                raise TargetError(f"Target not defined in '{DEFAULTS['CONFIG_FILE']}' conf file")
+                raise TargetError(f"Target not defined in '{CONFIG_FILE}' conf file")
             
-            if target_conf.get('type') == DEFAULTS['BACKUP_TYPES']['PUSH']:
-                target = PushTarget(target, common_conf.get('base_dest'), common_conf.get('work_dir'), target_conf, conf.get('default'))
+            if target_conf.get('type') == BackupType.PUSH.value:
+                target = PushTarget(target, target_conf, conf.get('default'), common_conf['dirs']['backups'], common_conf['dirs']['scripts'],common_conf['dirs']['work'])
             else:
-                target = PullTarget(target, common_conf.get('base_dest'), target_conf, conf.get('default'))
+                target = PullTarget(target, target_conf, conf.get('default'), common_conf['dirs']['backups'], common_conf['dirs']['scripts'], args.statsFile)
             
             log.info(f'[{args.action.upper()}] Start processing target')
 
-            if args.action == 'run':
+            if args.action == Action.RUN.value:
                 if type(target) == PullTarget and target.wake_on_lan: 
                     target.send_wol_packet()
                 target.create_backup()
-                state.set_target_status(target, f'({target.backup.display_size}) {target.backup.path}', NAGIOS['OK'], target.elapsed_time_copy, target.elapsed_time_pack, target.transfer_speed_copy, target.transfer_speed_pack)
-            elif args.action == 'cleanup':
+                state.set_target_status(target, f'({get_display_size(target.backup.size)}) {target.backup.path}', Nagios.OK, target.elapsed_time_copy, target.elapsed_time_pack, target.transfer_speed_copy, target.transfer_speed_pack)
+            elif args.action == Action.CLEANUP.value:
                 total_recovered_space = 0
                 total_removed_backups = 0
                 total_num = target.get_backups_num()
                 total_size = target.get_backups_size()
                 
                 if total_num == 0: 
-                    state.set_target_status(target, 'No found any backup', NAGIOS['WARNING'], total_recovered_space, total_removed_backups, target.max_size)
+                    state.set_target_status(target, 'No found any backup', Nagios.WARNING, 0, 0, target.max_size)
                 elif target.max_size:
                     if total_size >= target.max_size:
                         latest_backup = target.get_latest_backup()
@@ -935,17 +1000,17 @@ if __name__ == "__main__":
 
                         while target.max_size - total_size <= latest_backup.size * 1.5:  # Directory needs to have at least 150% of latest backup size
                             if target.get_backups_num() == 1 and not args.force:
-                                raise TargetCleanupError(f"Cleanup aborted, only 1 backup left but current max_size limit ({target.display_max_size}) is not enough for next backup (~{latest_backup.display_size}), consider increasing the limit or use -f/--force are to process cleanup")
+                                raise TargetCleanupError(f"Cleanup aborted, only 1 backup left but current max_size limit ({target.display_max_size}) is not enough for next backup (~{get_display_size(latest_backup.size)}), consider increasing the limit or use -f/--force are to process cleanup")
                             oldest_backup.remove()
                             total_removed_backups += 1
                             total_recovered_space += oldest_backup.size
                             oldest_backup = target.get_oldest_backup()
                             total_size = target.get_backups_size()
                         msg = f'Cleanup finished, removed {total_removed_backups} backup/s, recovered {get_display_size(total_recovered_space)} ({get_display_size(target.get_backups_size())} / {target.display_max_size})'
-                        state.set_target_status(target, msg, NAGIOS['OK'], total_recovered_space, total_removed_backups, total_size, target.max_size, target.max_num)
+                        state.set_target_status(target, msg, Nagios.OK, total_recovered_space, total_removed_backups, total_size, target.max_size, target.max_num)
                     else:
                         msg = f'No cleanup needed ({get_display_size(total_size)} / {get_display_size(target.max_size)})'
-                        state.set_target_status(target, msg, NAGIOS['OK'], total_recovered_space, total_removed_backups, total_size, target.max_size, target.max_num)
+                        state.set_target_status(target, msg, Nagios.OK, total_recovered_space, total_removed_backups, total_size, target.max_size, target.max_num)
                 elif target.max_num:
                     if total_num >= target.max_num:                      
                         log.info(f"Start cleanup, max number of backups exceeded ({total_num} / {target.max_num})")
@@ -959,14 +1024,17 @@ if __name__ == "__main__":
                             total_recovered_space += oldest_backup.size
                             total_num = target.get_backups_num()
                         msg = f'Cleanup finished, removed {total_removed_backups} backup/s, recovered {get_display_size(total_recovered_space)} ({total_num} / {target.max_num})'
-                        state.set_target_status(target, msg, NAGIOS['OK'], total_recovered_space, total_removed_backups, total_size, target.max_size, target.max_num)
+                        state.set_target_status(target, msg, Nagios.OK, total_recovered_space, total_removed_backups, total_size, target.max_size, target.max_num)
                     else:
                         msg = f'No cleanup needed ({total_num} / {target.max_num})'
-                        state.set_target_status(target, msg, NAGIOS['OK'], total_recovered_space, total_removed_backups, total_size, target.max_size, target.max_num)
-        except TargetException as e:
-            state.set_target_status(target, str(e), e.code)
+                        state.set_target_status(target, msg, Nagios.OK, 0, 0, total_size, target.max_size, target.max_num)
+            else:
+                raise TargetException(f"Action '{args.action}' is not defined")
+        except catch_exception_class as e:
+            code = e.code if hasattr(e, 'code') else Nagios.CRITICAL
+            state.set_target_status(target, str(e), code)
         
     state.remove_undefined_targets(list(conf["targets"]))
 
     #if not args.noReport:
-    #    nsca.send_report_to_nagios(NAGIOS[state.get_most_failure_status()], state.get_summary())
+    #    nagios.send_report_to_nagios(NAGIOS[state.get_most_failure_status()], state.get_summary())
