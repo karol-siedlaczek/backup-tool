@@ -121,12 +121,6 @@ class TargetCleanupError(TargetException):
         super().__init__(Nagios.CRITICAL)
         log.error(msg)
 
-class TargetCleanupSkipException(TargetException):  # TODO - currently not used
-    def __init__(self, msg) -> None:
-        super().__init__(Nagios.OK)
-        log.info(msg)
-
-    
 class InfluxServer():  # TODO - Setup pushing stats to influx
     __slots__ = ['client']
     
@@ -561,14 +555,13 @@ class Target():
     def get_backups_size(self) -> int:
         if os.path.exists(self.dest):
             try:
-                output = run_cmd(f"du -sb '{self.dest}' | awk '{{print $1}}'", shell=True)  # TODO
+                output = run_cmd(f"du -sb {self.dest}").split('\t')[0]
             except subprocess.CalledProcessError as e:
                 raise TargetError(f"Counting total size of backups failed: {e}: {e.stderr}")
             else:
                 return int(output)
         else:
             return 0
-    
     def get_backups_num(self) -> int:
         total_num = 0
         try:
@@ -646,7 +639,7 @@ class Target():
                     raise TargetError(f"Packing backup failed: {e}: {e.stderr}")
                 log.info(f"Backup successfully packed to '{new_package}' path")
 
-            self.elapsed_time_pack = (datetime.now() - pack_start_time).microseconds
+            self.elapsed_time_pack = round(((datetime.now() - pack_start_time).microseconds / 1000000 ), 2)
             backup.remove()
             backup = Backup(os.path.join(backup.directory, new_package))
             os.chdir(old_cwd)
@@ -766,7 +759,7 @@ class PullTarget(Target):
         try:
             copy_start_time = datetime.now()
             result = run_cmd(cmd)  # TODO - add reaction to 24 code (some file vanished) log.warning(f"Some files vanished in source during syncing: [{result.code}] {result.output}")
-            self.elapsed_time_copy = (datetime.now() - copy_start_time).microseconds
+            self.elapsed_time_copy = round(((datetime.now() - copy_start_time).microseconds / 1000000), 2)
         except subprocess.CalledProcessError as e:
             raise TargetError(f"Pulling target files failed: {e}: {e.stderr}")
         
@@ -951,7 +944,7 @@ if __name__ == "__main__":
         nagios_service = common_conf['nagios']['run_service']
     
     nagios = NagiosServer(common_conf['nagios']['host'], common_conf['nagios']['port'], common_conf['nagios']['host_service'], nagios_service)
-    
+
     if args.action == Action.PUSH_STATS.value:  # TODO
         influx_host = common_conf['influx']['host']
         influx_port = common_conf['influx']['port']   
@@ -972,9 +965,11 @@ if __name__ == "__main__":
                 raise TargetError(f"Target not defined in '{CONFIG_FILE}' conf file")
             
             if target_conf.get('type') == BackupType.PUSH.value:
-                target = PushTarget(target, target_conf, conf.get('default'), common_conf['dirs']['backups'], common_conf['dirs']['scripts'],common_conf['dirs']['work'])
+                target = PushTarget(target, target_conf, conf.get('default'), common_conf['dirs']['backups'], common_conf['dirs']['scripts'], common_conf['dirs']['work'])
+            elif target_conf.get('type') == BackupType.PULL.value:
+                target = PullTarget(target, target_conf, conf.get('default'), common_conf['dirs']['backups'], common_conf['dirs']['scripts'], args.statsFile if hasattr(args, 'statsFile') else None)
             else:
-                target = PullTarget(target, target_conf, conf.get('default'), common_conf['dirs']['backups'], common_conf['dirs']['scripts'], args.statsFile)
+                raise TargetException(f"Type '{target_conf.get('type')}' is not defined")
             
             log.info(f'[{args.action.upper()}] Start processing target')
 
@@ -998,9 +993,9 @@ if __name__ == "__main__":
                         
                         log.info(f"Start cleanup, current total size over limit ({get_display_size(total_size)} / {target.display_max_size})")
 
-                        while target.max_size - total_size <= latest_backup.size * 1.5:  # Directory needs to have at least 150% of latest backup size
+                        while target.max_size - total_size <= latest_backup.size * 1.5:  # Directory needs to have at least 150% free space of latest backup size
                             if target.get_backups_num() == 1 and not args.force:
-                                raise TargetCleanupError(f"Cleanup aborted, only 1 backup left but current max_size limit ({target.display_max_size}) is not enough for next backup (~{get_display_size(latest_backup.size)}), consider increasing the limit or use -f/--force are to process cleanup")
+                                raise TargetCleanupError(f"Cleanup aborted, only 1 backup left but current max_size limit ({target.display_max_size}) is not enough for next backup*1.5 (~{get_display_size(latest_backup.size*1.5)}), consider increasing the limit or use -f/--force are to process cleanup")
                             oldest_backup.remove()
                             total_removed_backups += 1
                             total_recovered_space += oldest_backup.size
