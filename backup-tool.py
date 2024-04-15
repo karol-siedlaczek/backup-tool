@@ -222,7 +222,7 @@ class RunState(State):
     def set_target_status(self, target_name, msg, code, elapsed_time_copy=None, elapsed_time_pack=None, transfer_speed_copy=None, transfer_speed_pack=None) -> None:
         new_state = self.state
         new_state[str(target_name)] = {
-            'timestamp': datetime.now(),
+            'timestamp': datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
             'code': int(code),
             'status': Nagios.get_status_by_code(code),
             'times': {
