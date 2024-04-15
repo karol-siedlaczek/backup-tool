@@ -288,16 +288,16 @@ class Backup():
 
     def remove(self) -> None:
         try:
-            log.info(f"Deleting backup '{self}' in progress...")
+            log.debug(f"Deleting '{self}' in progress...")
             files_to_delete = [self.path]
             manifest_file = self.__get_manifest_file()
             if manifest_file:
                 files_to_delete.append(manifest_file)
             for file_to_delete in files_to_delete:
                 remove_file_or_dir(file_to_delete)
-            log.info(f"Backup '{self}' deleted [{get_display_size(self.size)}]")
+            log.debug(f"Path '{self}' deleted [{get_display_size(self.size)}]")
         except PermissionError as error:
-            raise TargetError(f"Cannot delete backup '{self}', reason: {error}")
+            raise TargetError(f"Cannot delete '{self}', reason: {error}")
     
     def __get_manifest_file(self) -> str:
         if self.manifest_file:
