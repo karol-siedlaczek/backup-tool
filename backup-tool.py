@@ -17,7 +17,7 @@ from wakeonlan import send_magic_packet
 import subprocess
 import logging
 
-CONFIG_FILE = 'backup-tool.yaml'
+CONFIG_FILE = '/etc/backup-tool/backup-tool.yaml'
 # TODO
 # c - create, g - list for incremental, p - preserve permissions, 
 # z - compress to gzip, f - file to backup, i - ignore zero-blocks, O - extract fields to stdio
