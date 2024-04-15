@@ -1032,4 +1032,4 @@ if __name__ == "__main__":
     state.remove_undefined_targets(list(conf["targets"]))
 
     if not args.noReport:
-        nagios.send_report_to_nagios(NAGIOS[state.get_most_failure_status()], state.get_summary())
+        nagios.send_report_to_nagios(getattr(Nagios, str(state.get_most_failure_status())), state.get_summary())
