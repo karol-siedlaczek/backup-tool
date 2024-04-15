@@ -8,6 +8,7 @@ import grp
 import yaml
 import math
 import argparse
+from nagios import send
 from enum import Enum, auto
 from glob import glob
 from influxdb import InfluxDBClient
@@ -145,12 +146,22 @@ class NagiosServer():
         self.service = service
     
     def send_report_to_nagios(self, code, msg) -> None:
-        try:
-            msg = f'{self.host_service}\t{self.service}\t{code}\t{msg}'
-            run_cmd(f"echo -e '{msg}' | {self.bin} -H {self.host} -p {self.port}", True)
-            log.debug(f"Nsca packet '{msg}' sent to {self.host}:{self.port}")
-        except subprocess.CalledProcessError as e:
-            raise ConnectionError(f"Sending nsca packet to {self.host}:{self.port} failed: {e}: {e.stderr}")
+        msg = f'{self.host_service}\t{self.service}\t{code}\t{msg}'
+        send(
+            message=msg,
+            nsca=self.bin,
+            target_host=self.host,
+            host_name=self.host_service,
+            service_description=self.service,
+            service_status=Nagios.get_status_by_code(code)
+        )
+        log.debug(f"Nsca packet '{msg}' sent to {self.host}:{self.port}")
+        # try:
+        #     msg = f'{self.host_service}\t{self.service}\t{code}\t{msg}'
+        #     run_cmd(f"echo -e '{msg}' | {self.bin} -H {self.host} -p {self.port}", True)
+            
+        # except subprocess.CalledProcessError as e:
+        #     raise ConnectionError(f"Sending nsca packet to {self.host}:{self.port} failed: {e}: {e.stderr}")
     
     def __str__(self) -> str:
         return self.name
