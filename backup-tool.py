@@ -213,7 +213,7 @@ class State():
         
         for target, target_state in self.state.items():
             summary += f"{target_state.get('status')}: [{target}] {target_state.get('msg')} ({target_state.get('timestamp')})</br>"
-        return summary
+        return summary[:-5]
 
 class RunState(State):
     def __init__(self, state_file) -> None:
