@@ -143,7 +143,7 @@ class NagiosServer():
     
     def send_report_to_nagios(self, code, msg) -> None:
         msg = f'{self.host_service}\t{self.service}\t{code}\t{msg}'
-        echo_process = subprocess.Popen(msg.split(' '), stdout=subprocess.PIPE)
+        echo_process = subprocess.Popen(f'echo -e {msg}'.split(' '), stdout=subprocess.PIPE)
         nsca_process = subprocess.Popen(['send_nsca', '-H', str(self.host), '-p', str(self.port)], stdin=echo_process.stdout, stderr=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
         stdout, stderr = nsca_process.communicate()
         if stderr:
