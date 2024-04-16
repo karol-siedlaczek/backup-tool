@@ -761,6 +761,7 @@ class PullTarget(Target):
             result = run_cmd(cmd)  # TODO - add reaction to 24 code (some file vanished) log.warning(f"Some files vanished in source during syncing: [{result.code}] {result.output}")
             self.elapsed_time_copy = round(((datetime.now() - copy_start_time).microseconds / 1000000), 2)
         except subprocess.CalledProcessError as e:
+            remove_file_or_dir(new_backup_path)
             raise TargetError(f"Pulling target files failed: {e}: {e.stderr}")
         
         if self.stats_file:
