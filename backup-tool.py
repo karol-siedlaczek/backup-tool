@@ -245,7 +245,7 @@ class CleanupState(State):
     def set_target_status(self, target_name, msg, code, recovered_space=None, removed_backups=None, total_size=None, max_size=None, max_num=None) -> None:
         new_state = self.state
         new_state[str(target_name)] = {
-            'timestamp': datetime.now(),
+            'timestamp': datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
             'code': int(code),
             'status': Nagios.get_status_by_code(code),
             'recovered_space': recovered_space,
