@@ -8,7 +8,6 @@ import grp
 import yaml
 import math
 import argparse
-from nagios import send
 from enum import Enum, auto
 from glob import glob
 from influxdb import InfluxDBClient
@@ -146,22 +145,12 @@ class NagiosServer():
         self.service = service
     
     def send_report_to_nagios(self, code, msg) -> None:
-        msg = f'{self.host_service}\t{self.service}\t{code}\t{msg}'
-        send(
-            message=msg,
-            nsca=self.bin,
-            target_host=self.host,
-            host_name=self.host_service,
-            service_description=self.service,
-            service_status=Nagios.get_status_by_code(code)
-        )
-        log.debug(f"Nsca packet '{msg}' sent to {self.host}:{self.port}")
-        # try:
-        #     msg = f'{self.host_service}\t{self.service}\t{code}\t{msg}'
-        #     run_cmd(f"echo -e '{msg}' | {self.bin} -H {self.host} -p {self.port}", True)
-            
-        # except subprocess.CalledProcessError as e:
-        #     raise ConnectionError(f"Sending nsca packet to {self.host}:{self.port} failed: {e}: {e.stderr}")
+        try:
+            msg = f'{self.host_service}\t{self.service}\t{code}\t{msg}'
+            run_cmd(f"echo -e '{msg}' | {self.bin} -H {self.host} -p {self.port}", True)
+            log.debug(f"Nsca packet '{msg}' sent to {self.host}:{self.port}")
+        except subprocess.CalledProcessError as e:
+            raise ConnectionError(f"Sending nsca packet to {self.host}:{self.port} failed: {e}: {e.stderr}")
     
     def __str__(self) -> str:
         return self.name
@@ -932,8 +921,8 @@ def get_logger(log_file, verbose_level) -> None:
     logging.setLogRecordFactory(record_factory)
     return logging.getLogger('backup-tool')
 
-def run_cmd(cmd, shell=False, check=True) -> str:
-    process = subprocess.run(cmd.split(' '), stderr=subprocess.PIPE, stdout=subprocess.PIPE, shell=shell, check=check, text=True)
+def run_cmd(cmd, check=True) -> str:
+    process = subprocess.run(cmd.split(' '), stderr=subprocess.PIPE, stdout=subprocess.PIPE, shell=False, check=check, text=True)
     return process.stdout or process.stderr
 
 if __name__ == "__main__":
@@ -1007,7 +996,9 @@ if __name__ == "__main__":
                         while target.max_size - total_size <= latest_backup.size * 1.5:  # Directory needs to have at least 150% free space of latest backup size
                             if target.get_backups_num() == 1 and not args.force:
                                 raise TargetCleanupError(f"Cleanup aborted, only 1 backup left but current max_size limit ({target.display_max_size}) is not enough for next backup*1.5 (~{get_display_size(latest_backup.size*1.5)}), consider increasing the limit or use -f/--force are to process cleanup")
+                            log.info(f"Backup '{oldest_backup}' removing...")
                             oldest_backup.remove()
+                            log.info(f"Backup '{oldest_backup}' removed")
                             total_removed_backups += 1
                             total_recovered_space += oldest_backup.size
                             oldest_backup = target.get_oldest_backup()
@@ -1025,7 +1016,9 @@ if __name__ == "__main__":
                             if total_num == 1 and not args.force:
                                 raise TargetCleanupError(f"Cleanup aborted, only 1 backup left and current max_num limit allows only for {target.max_num} backup, directory cannot be empty, consider increasing the limit or use -f/--force are to process cleanup")
                             oldest_backup = target.get_oldest_backup()
+                            log.info(f"Backup '{oldest_backup}' removing...")
                             oldest_backup.remove()
+                            log.info(f"Backup '{oldest_backup}' removed")
                             total_removed_backups += 1
                             total_recovered_space += oldest_backup.size
                             total_num = target.get_backups_num()
