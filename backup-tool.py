@@ -742,7 +742,7 @@ class PullTarget(Target):
         
     def create_backup(self) -> Backup:
         new_backup_path = os.path.join(self.dest, Backup.get_today_package_name())
-        base_cmd = f'rsync -aW --contimeout {self.timeout}{f" --password-file {self.password_file}" if self.remote else ""}'
+        base_cmd = f'rsync -aW{f" --contimeout {self.timeout} --password-file {self.password_file}" if self.remote else ""}'
         
         if self.stats_file:
             base_cmd += " --stats --info=name1,progress2"
