@@ -936,7 +936,7 @@ if __name__ == "__main__":
     log = get_logger(common_conf['files']['log'], args.verbose)
     catch_exception_class = TargetException if args.verbose > 1 else Exception
     target = '-'
-    
+
     if args.action == 'cleanup':
         state = CleanupState(common_conf['files']['cleanup_state'])
         nagios_service = common_conf['nagios']['cleanup_service']
@@ -958,7 +958,10 @@ if __name__ == "__main__":
             log.error(f"ERROR: Connection to influx server failed: {e}")
             sys.exit(Nagios.WARNING)
         sys.exit(Nagios.OK)
-        
+    
+    if 'all' in args.targets:
+        args.targets = list(conf.get('targets'))
+    
     for target in args.targets:
         try:
             target_conf = conf['targets'].get(target)
