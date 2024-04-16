@@ -234,7 +234,7 @@ class RunState(State):
                     'transfer_speed': transfer_speed_pack
                 }
             },
-            'msg': str(msg)
+            'msg': f'{msg[:100]}... ({len(msg) - 100} log lines truncated)' if len(msg) > 100 else msg
         }
         super().set_target_status(target_name, new_state, msg)
 
@@ -670,7 +670,8 @@ class PullTarget(Target):
         self.password_file = conf.get('password_file') or default_conf.get('password_file')
         self.exclude = conf.get('exclude') or default_conf.get('exclude')
         self.wake_on_lan = bool(conf.get('wake_on_lan'))
-        self.stats_file = stats_file        
+        self.stats_file = stats_file    
+        self.remote = bool(re.match(r'^rsync:\/\/[a-zA-Z_\-\.0-9]*@', self.sources[0]))
         
         if self.wake_on_lan:
             self._mac_address = conf.get('wake_on_lan').get('mac_address')
@@ -741,7 +742,7 @@ class PullTarget(Target):
         
     def create_backup(self) -> Backup:
         new_backup_path = os.path.join(self.dest, Backup.get_today_package_name())
-        base_cmd = f'rsync -aW --contimeout {self.timeout} --password-file {self.password_file}'
+        base_cmd = f'rsync -aW --contimeout {self.timeout}{f" --password-file {self.password_file}" if self.remote else ''}'
         
         if self.stats_file:
             base_cmd += " --stats --info=name1,progress2"
