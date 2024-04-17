@@ -924,8 +924,13 @@ def get_logger(log_file, verbose_level) -> None:
     return logging.getLogger('backup-tool')
 
 def run_cmd(cmd, check=True) -> str:
-    process = subprocess.run(shlex.split(cmd), stdin=subprocess.DEVNULL, stderr=subprocess.PIPE, stdout=subprocess.PIPE, check=check, text=True)
-    return process.stdout or process.stderr
+    process = subprocess.Popen(shlex.split(cmd), stdin=subprocess.DEVNULL, stderr=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
+    stdout, stderr = process.communicate()
+    if check and stderr:
+        raise subprocess.CalledProcessError(stderr)
+    return stdout if stdout else stderr
+    #process = subprocess.run(shlex.split(cmd), stdin=subprocess.DEVNULL, stderr=subprocess.PIPE, stdout=subprocess.PIPE, check=check, text=True)
+    #return process.stdout or process.stderr
 
 if __name__ == "__main__":
     args = parse_args()
