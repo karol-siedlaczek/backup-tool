@@ -7,6 +7,7 @@ import pwd
 import grp
 import yaml
 import math
+import shlex
 import argparse
 from enum import Enum, auto
 from glob import glob
@@ -747,7 +748,7 @@ class PullTarget(Target):
         if self.stats_file:
             base_cmd += " --stats --info=name1,progress2"
         if self.exclude:
-            exclude_args = ' '.join(f'--exclude "{exclude_arg}"' for exclude_arg in self.exclude)
+            exclude_args = ' '.join(f'--exclude {exclude_arg}' for exclude_arg in self.exclude)
             base_cmd = f'{base_cmd} {exclude_args}'
         
         source_args = ' '.join(source for source in self.sources)
@@ -923,7 +924,7 @@ def get_logger(log_file, verbose_level) -> None:
     return logging.getLogger('backup-tool')
 
 def run_cmd(cmd, check=True) -> str:
-    process = subprocess.run(cmd.split(' '), stderr=subprocess.PIPE, stdout=subprocess.PIPE, shell=False, check=check, text=True)
+    process = subprocess.run(shlex.split(cmd), stderr=subprocess.PIPE, stdout=subprocess.PIPE, check=check, text=True)
     return process.stdout or process.stderr
 
 if __name__ == "__main__":
