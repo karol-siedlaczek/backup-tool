@@ -9,7 +9,7 @@ import yaml
 import math
 import shlex
 import argparse
-from enum import Enum, auto
+from enum import Enum
 from glob import glob
 from influxdb import InfluxDBClient
 from inspect import isclass
@@ -743,7 +743,7 @@ class PullTarget(Target):
         
     def create_backup(self) -> Backup:
         new_backup_path = os.path.join(self.dest, Backup.get_today_package_name())
-        base_cmd = f'rsync -aW --timeout 30 --partial{f" --contimeout {self.timeout} --password-file {self.password_file}" if self.remote else ""}'
+        base_cmd = f'rsync -aW --timeout 30 {f" --contimeout {self.timeout} --password-file {self.password_file}" if self.remote else ""}'
         
         if self.stats_file:
             base_cmd += " --stats --info=name1,progress2"
@@ -924,7 +924,7 @@ def get_logger(log_file, verbose_level) -> None:
     return logging.getLogger('backup-tool')
 
 def run_cmd(cmd, check=True) -> str:
-    process = subprocess.run(shlex.split(cmd),stdin=subprocess.DEVNULL stderr=subprocess.PIPE, stdout=subprocess.PIPE, check=check, text=True)
+    process = subprocess.run(shlex.split(cmd), stdin=subprocess.DEVNULL, stderr=subprocess.PIPE, stdout=subprocess.PIPE, check=check, text=True)
     return process.stdout or process.stderr
 
 if __name__ == "__main__":
