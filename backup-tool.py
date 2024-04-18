@@ -157,6 +157,7 @@ class NagiosServer():
            
            
 class State():
+    MAX_MSG = 300
     __slots__ = ['state_file', 'state']
     
     def __init__(self, state_file) -> None:
@@ -235,7 +236,7 @@ class RunState(State):
                     'transfer_speed': transfer_speed_pack
                 }
             },
-            'msg': f'{msg[:100]}... ({len(msg) - 100} log lines truncated)' if len(msg) > 100 else msg
+            'msg': f'{msg[:State.MAX_MSG]}... ({len(msg) - State.MAX_MSG} log lines truncated)' if len(msg) > State.MAX_MSG else msg
         }
         super().set_target_status(target_name, new_state, msg)
 
@@ -254,7 +255,7 @@ class CleanupState(State):
             'total_size': total_size,
             'max_size': max_size,
             'max_num': max_num,
-            'msg': str(msg)
+            'msg': f'{msg[:State.MAX_MSG]}... ({len(msg) - State.MAX_MSG} log lines truncated)' if len(msg) > State.MAX_MSG else msg
         }
         super().set_target_status(target_name, new_state, msg)
 
@@ -272,7 +273,7 @@ class Backup():
         if self.__is_valid_backup():
             date_regex = r'([\d]{4}-[\d]{2}-[\d]{2}_[\d]{2}-[\d]{2})'
             self.date = datetime.strptime(re.search(date_regex, package).group(1), self.DATE_FORMAT)
-            self.size = Backup.get_dir_size(self.path) if os.path.isdir(self.path) else os.stat(self.path).st_size
+            self.size = get_path_size(self.path)
             self.incremental_file = os.path.join(self.directory, 'incremental.snapshot')
             self.manifest_file = None
         else:
@@ -317,9 +318,9 @@ class Backup():
         
         try:
             with open(manifest_file, 'w') as f:
-                f.writelines(run_cmd(f'/usr/bin/find {self.path} -printf %AF-%AT\t%s\t%p\n'))
+                f.writelines(run_cmd(f"/usr/bin/find {self.path} -printf '%AF-%AT\t%s\t%p\n'"))
         except subprocess.CalledProcessError as e:
-            raise TargetError(f"Getting content to manifest file from '{self.path}' failed: {e}: {e.stderr}")
+            raise TargetError(f"Getting content to manifest file from '{self.package}' failed: {e}: {e.stderr}")
 
         if format == Format.PACKAGE.value or format == Format.ENCRYPTED_PACKAGE.value:
             self.manifest_file = manifest_file.replace('.txt', '.tar.gz')
@@ -351,17 +352,6 @@ class Backup():
     @staticmethod
     def get_today_package_name() -> str:
         return f'backup-{datetime.now().strftime(Backup.DATE_FORMAT)}'
-    
-    @staticmethod
-    def get_dir_size(path='.') -> int:
-        total = 0
-        with os.scandir(path) as it:
-            for entry in it:
-                if entry.is_file():
-                    total += entry.stat().st_size
-                elif entry.is_dir():
-                    total += Backup.get_dir_size(entry.path)
-        return total
         
     def __str__(self) -> str:
         return self.path
@@ -553,15 +543,8 @@ class Target():
             self._encryption_key = None
 
     def get_backups_size(self) -> int:
-        if os.path.exists(self.dest):
-            try:
-                output = run_cmd(f"du -sb {self.dest}").split('\t')[0]
-            except subprocess.CalledProcessError as e:
-                raise TargetError(f"Counting total size of backups failed: {e}: {e.stderr}")
-            else:
-                return int(output)
-        else:
-            return 0
+        return get_path_size(self.dest)
+        
     def get_backups_num(self) -> int:
         total_num = 0
         try:
@@ -636,6 +619,7 @@ class Target():
                     run_cmd(f'tar -piz -cf {new_package} {backup.package}')
                 except subprocess.CalledProcessError as e:
                     backup.remove()
+                    remove_file_or_dir(new_package)
                     raise TargetError(f"Packing backup failed: {e}: {e.stderr}")
                 log.info(f"Backup successfully packed to '{new_package}' path")
 
@@ -742,8 +726,8 @@ class PullTarget(Target):
             self._stats_file = None
         
     def create_backup(self) -> Backup:
-        new_backup_path = os.path.join(self.dest, Backup.get_today_package_name())
-        base_cmd = f'rsync -aW --timeout 30 {f" --contimeout {self.timeout} --password-file {self.password_file}" if self.remote else ""}'
+        new_backup_path = os.path.join(self.dest, Backup.get_today_package_name()) # -rlptgoD
+        base_cmd = f'rsync -rlptoW --timeout 30 --no-specials --no-devices{f" --contimeout {self.timeout} --password-file {self.password_file}" if self.remote else ""}'
         
         if self.stats_file:
             base_cmd += " --stats --info=name1,progress2"
@@ -763,7 +747,8 @@ class PullTarget(Target):
             self.elapsed_time_copy = round(((datetime.now() - copy_start_time).microseconds / 1000000), 2)
         except subprocess.CalledProcessError as e:
             remove_file_or_dir(new_backup_path)
-            raise TargetError(f"Pulling target files failed: {e}: {e.stderr}")
+            log.error(f"Pulling target files failed: [{e.returncode}] {e}: {e.stderr}")
+            raise TargetError(f"Pulling target files failed: {e.stderr}")
         
         if self.stats_file:
             with open(self.stats_file, 'w') as f:
@@ -889,6 +874,17 @@ def get_display_size(size) -> str:
     display_size = round(size / p, 2)
     return f'{display_size} {size_names[i]}'
 
+def get_path_size(path) -> int:
+    if os.path.exists(path):
+        try:
+            output = run_cmd(f"du -sb {path}").split('\t')[0]
+        except subprocess.CalledProcessError as e:
+            raise TargetError(f"Counting total size of path failed: {e}: {e.stderr}")
+        else:
+            return int(output)
+    else:
+        return 0
+
 def format_hours_to_ago(hours_amount) -> str:
     days = hours_amount // 24
     hours = hours_amount % 24
@@ -924,13 +920,13 @@ def get_logger(log_file, verbose_level) -> None:
     return logging.getLogger('backup-tool')
 
 def run_cmd(cmd, check=True) -> str:
-    process = subprocess.Popen(shlex.split(cmd), stdin=subprocess.DEVNULL, stderr=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
-    stdout, stderr = process.communicate()
-    if check and stderr:
-        raise subprocess.CalledProcessError(stderr)
-    return stdout if stdout else stderr
-    #process = subprocess.run(shlex.split(cmd), stdin=subprocess.DEVNULL, stderr=subprocess.PIPE, stdout=subprocess.PIPE, check=check, text=True)
-    #return process.stdout or process.stderr
+    # process = subprocess.Popen(shlex.split(cmd), stdin=subprocess.DEVNULL, stderr=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
+    # stdout, stderr = process.communicate()
+    # if check and stderr:
+    #     raise subprocess.CalledProcessError(cmd=cmd, stderr=stderr, returncode=process.returncode)
+    # return stdout if stdout else stderr
+    process = subprocess.run(shlex.split(cmd), stdin=subprocess.DEVNULL, stderr=subprocess.PIPE, stdout=subprocess.PIPE, check=check, text=True)
+    return process.stdout or process.stderr
 
 if __name__ == "__main__":
     args = parse_args()
