@@ -306,12 +306,12 @@ class Backup():
             return self.manifest_file
         else:
             try:
-                return glob(f'{self.directory}/manifests/{self.display_date}.manifest*')[0]
+                return glob(f'{self.directory}/manifests/backup-{self.display_date}.manifest*')[0]
             except IndexError:
                 return None
     
     def create_manifest_file(self) -> None:
-        self.manifest_file = f'{self.display_date}.manifest'
+        self.manifest_file = f'backup-{self.display_date}.manifest'
         manifests_dir = os.path.join(self.directory, 'manifests')
         os.makedirs(manifests_dir, exist_ok=True)
         manifest_path = os.path.join(manifests_dir, self.manifest_file)
