@@ -477,6 +477,22 @@ class Target():
     def encryption_key(self) -> str:
         return self._encryption_key
     
+    @property
+    def elapsed_time_copy(self) -> int:
+        return self._elapsed_time_copy
+    
+    @property
+    def elapsed_time_pack(self) -> int:
+        return self._elapsed_time_pack
+    
+    @property
+    def transfer_speed_copy(self) -> int:
+        return self._transfer_speed_copy
+    
+    @property
+    def transfer_speed_pack(self) -> int:
+        return self._transfer_speed_pack
+    
     @type.setter
     def type(self, value) -> str:
         TargetValidator.validate_required_param('type', value)
@@ -544,6 +560,34 @@ class Target():
         else:
             self._encryption_key = None
 
+    @elapsed_time_copy.setter
+    def elapsed_time_copy(self, value) -> str:
+        if value is not None and value == 0:
+            self._elapsed_time_copy = 1
+        else:
+            self._elapsed_time_copy = value
+    
+    @elapsed_time_pack.setter
+    def elapsed_time_pack(self, value) -> str:
+        if value is not None and value == 0:
+            self._elapsed_time_pack = 1
+        else:
+            self._elapsed_time_pack = value
+        
+    @transfer_speed_copy.setter
+    def transfer_speed_copy(self, value) -> str:
+        if value is not None and value == 0:
+            self._transfer_speed_copy = 1
+        else:
+            self._transfer_speed_copy = value
+        
+    @transfer_speed_pack.setter
+    def transfer_speed_pack(self, value) -> str:
+        if value is not None and value == 0:
+            self._transfer_speed_pack = 1
+        else:
+            self._transfer_speed_pack = value
+        
     def get_backups_size(self) -> int:
         return get_path_size(self.dest)
         
