@@ -314,8 +314,8 @@ class Backup():
         self.manifest_file = f'{self.display_date}.manifest'
         manifests_dir = os.path.join(self.directory, 'manifests')
         os.makedirs(manifests_dir, exist_ok=True)
-        old_cwd = os.getcwd()
-        os.chdir(manifests_dir)
+        # old_cwd = os.getcwd()
+        # os.chdir(manifests_dir)
         
         try:
             log.info(f"Saving manifest file in '{self.manifest_file}'...")
@@ -340,7 +340,7 @@ class Backup():
         #     remove_file_or_dir(manifest_file)
         # else:
         #     self.manifest_file = manifest_file
-        os.chdir(old_cwd)
+        # os.chdir(old_cwd)
         log.info(f"Manifest file created in '{self.manifest_file}'")
 
     def set_permissions(self, permissions) -> None:
