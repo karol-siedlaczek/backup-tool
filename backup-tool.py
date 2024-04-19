@@ -316,12 +316,12 @@ class Backup():
         os.makedirs(manifests_dir, exist_ok=True)
         manifest_path = os.path.join(manifests_dir, self.manifest_file)
         old_cwd = os.getcwd()
-        os.chdir(manifests_dir)
+        os.chdir(self.path)
         
         try:
             log.info(f"Saving manifest file in '{manifest_path}'...")
             with open(manifest_path, 'w') as f:
-                f.writelines(run_cmd(f"/usr/bin/find {self.path} -printf '%AF-%AT\t%s\t%p\n'"))
+                f.writelines(run_cmd(f"/usr/bin/find . -printf '%AF-%AT\t%s\t%p\n'"))
         except subprocess.CalledProcessError as e:
             raise TargetError(f"Saving manifest file from '{self.package}' failed: {e}: {e.stderr}")
 
