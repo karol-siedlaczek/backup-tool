@@ -608,7 +608,7 @@ class Target():
             if self.encryption_key:
                 log.info(f"Packing and encrypting backup to '{new_package}.gpg'...")
                 try:
-                    new_package = run_cmd(f"{self.scripts_dir}/pack_and_encrypt.sh {backup.package} {self.encryption_key} {new_package}")
+                    new_package = run_cmd(f"{self.scripts_dir}/pack_and_encrypt.sh {backup.package} {self.encryption_key} {new_package} {backup.incremental_file}")
                 except subprocess.CalledProcessError as e:
                     backup.remove()
                     raise TargetError(f"Packing and encrypting backup failed: {e}: {e.stderr}")
@@ -616,7 +616,7 @@ class Target():
             else:
                 log.info(f"Packing backup to '{new_package}'...")
                 try:
-                    run_cmd(f'tar -piz -cf {new_package} {backup.package}')
+                    run_cmd(f'tar -g {backup.incremental_file} -piz -cf {new_package} {backup.package}')
                 except subprocess.CalledProcessError as e:
                     backup.remove()
                     remove_file_or_dir(new_package)
