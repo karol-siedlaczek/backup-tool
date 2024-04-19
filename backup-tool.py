@@ -623,7 +623,7 @@ class Target():
                     raise TargetError(f"Packing backup failed: {e}: {e.stderr}")
                 log.info(f"Backup successfully packed to '{new_package}' path")
 
-            self.elapsed_time_pack = round(((datetime.now() - pack_start_time).microseconds / 1000000 ), 2)
+            self.elapsed_time_pack = round((datetime.now() - pack_start_time).seconds, 2)
             backup.remove()
             backup = Backup(os.path.join(backup.directory, new_package))
             os.chdir(old_cwd)
@@ -744,7 +744,7 @@ class PullTarget(Target):
         try:
             copy_start_time = datetime.now()
             result = run_cmd(cmd)  # TODO - add reaction to 24 code (some file vanished) log.warning(f"Some files vanished in source during syncing: [{result.code}] {result.output}")
-            self.elapsed_time_copy = round(((datetime.now() - copy_start_time).microseconds / 1000000), 2)
+            self.elapsed_time_copy = round((datetime.now() - copy_start_time).seconds, 2)
         except subprocess.CalledProcessError as e:
             remove_file_or_dir(new_backup_path)
             log.error(f"Pulling target files failed: [{e.returncode}] {e}: {e.stderr}")
