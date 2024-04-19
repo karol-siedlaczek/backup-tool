@@ -314,12 +314,13 @@ class Backup():
         self.manifest_file = f'{self.display_date}.manifest'
         manifests_dir = os.path.join(self.directory, 'manifests')
         os.makedirs(manifests_dir, exist_ok=True)
+        manifest_path = os.path.join(manifests_dir, self.manifest_file)
         # old_cwd = os.getcwd()
         # os.chdir(manifests_dir)
         
         try:
-            log.info(f"Saving manifest file in '{self.manifest_file}'...")
-            with open(self.manifest_file, 'w') as f:
+            log.info(f"Saving manifest file in '{manifest_path}'...")
+            with open(manifest_path, 'w') as f:
                 f.writelines(run_cmd(f"/usr/bin/find {self.path} -printf '%AF-%AT\t%s\t%p\n'"))
         except subprocess.CalledProcessError as e:
             raise TargetError(f"Saving manifest file from '{self.package}' failed: {e}: {e.stderr}")
@@ -341,7 +342,7 @@ class Backup():
         # else:
         #     self.manifest_file = manifest_file
         # os.chdir(old_cwd)
-        log.info(f"Manifest file created in '{self.manifest_file}'")
+        log.info(f"Manifest file created in '{manifest_path}'")
 
     def set_permissions(self, permissions) -> None:
         os.chmod(self.path, eval(f"0o{permissions}"))
