@@ -285,7 +285,7 @@ class Backup():
         return self.date.strftime(Backup.DATE_FORMAT)
     
     def __is_valid_backup(self) -> bool:  # Matches only filenames created by backup tool
-        regex = r'^backup-[\d]{4}-[\d]{2}-[\d]{2}_[\d]{2}-[\d]{2}|\.tar\.gz|\.gpg$'
+        regex = r'^backup-[\d]{4}-[\d]{2}-[\d]{2}_[\d]{2}-[\d]{2}|\.tar\.gz|\.gpg|\.tar$'
         return bool(re.match(regex, self.package))
 
     def remove(self) -> None:
