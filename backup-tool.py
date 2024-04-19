@@ -69,6 +69,7 @@ class BackupType(Defaults):
 
 class Format(Defaults):
     PACKAGE = 'package'
+    COMPRESSED_PACKAGE = 'compressed-package'
     ENCRYPTED_PACKAGE = 'encrypted-package'
     RAW = 'raw'
     
@@ -305,39 +306,40 @@ class Backup():
             return self.manifest_file
         else:
             try:
-                return glob(f'{self.directory}/manifests/manifest-{self.display_date}*')[0]
+                return glob(f'{self.directory}/manifests/{self.display_date}.manifest*')[0]
             except IndexError:
                 return None
     
-    def create_manifest_file(self, format, scripts_dir, encryption_key=None) -> None:
-        manifest_file = f'manifest-{self.display_date}.txt'
+    def create_manifest_file(self) -> None:
+        self.manifest_file = f'{self.display_date}.manifest'
         manifests_dir = os.path.join(self.directory, 'manifests')
         os.makedirs(manifests_dir, exist_ok=True)
         old_cwd = os.getcwd()
         os.chdir(manifests_dir)
         
         try:
-            with open(manifest_file, 'w') as f:
+            log.info(f"Saving manifest file in '{self.manifest_file}'...")
+            with open(self.manifest_file, 'w') as f:
                 f.writelines(run_cmd(f"/usr/bin/find {self.path} -printf '%AF-%AT\t%s\t%p\n'"))
         except subprocess.CalledProcessError as e:
-            raise TargetError(f"Getting content to manifest file from '{self.package}' failed: {e}: {e.stderr}")
+            raise TargetError(f"Saving manifest file from '{self.package}' failed: {e}: {e.stderr}")
 
-        if format == Format.PACKAGE.value or format == Format.ENCRYPTED_PACKAGE.value:
-            self.manifest_file = manifest_file.replace('.txt', '.tar.gz')
+        # if format == Format.PACKAGE.value or format == Format.ENCRYPTED_PACKAGE.value or Format.COMPRESSED_PACKAGE:
+        #     self.manifest_file = manifest_file.replace('.txt', '.tar')
             
-            if encryption_key:
-                try:
-                    self.manifest_file = run_cmd(f"{scripts_dir}/pack_and_encrypt.sh {manifest_file} {encryption_key} {self.manifest_file}")
-                except subprocess.CalledProcessError as e:
-                    raise TargetError(f"Packing and encrypting manifest to {self.manifest_file} failed: {e}: {e.stderr}")
-            else:
-                try:
-                    run_cmd(f"tar czf {self.manifest_file} {manifest_file}")
-                except subprocess.CalledProcessError as e:
-                    raise TargetError(f"Packing manifest to {self.manifest_file} failed: {e}: {e.stderr}")
-            remove_file_or_dir(manifest_file)
-        else:
-            self.manifest_file = manifest_file
+        #     if encryption_key:
+        #         try:
+        #             self.manifest_file = run_cmd(f"{scripts_dir}/pack_and_encrypt.sh {manifest_file} {encryption_key} {self.manifest_file}")
+        #         except subprocess.CalledProcessError as e:
+        #             raise TargetError(f"Packing and encrypting manifest to {self.manifest_file} failed: {e}: {e.stderr}")
+        #     else:
+        #         try:
+        #             run_cmd(f"tar czf {self.manifest_file} {manifest_file}")
+        #         except subprocess.CalledProcessError as e:
+        #             raise TargetError(f"Packing manifest to {self.manifest_file} failed: {e}: {e.stderr}")
+        #     remove_file_or_dir(manifest_file)
+        # else:
+        #     self.manifest_file = manifest_file
         os.chdir(old_cwd)
         log.info(f"Manifest file created in '{self.manifest_file}'")
 
@@ -591,7 +593,7 @@ class Target():
         backup.set_permissions(self.permissions)
          
         try:
-            backup.create_manifest_file(self.format, self.scripts_dir, self.encryption_key)
+            backup.create_manifest_file()
         except TargetError as error:
             backup.remove()
             raise TargetError(error)
@@ -599,31 +601,37 @@ class Target():
         if self.elapsed_time_copy:  # bytes per sec
             self.transfer_speed_copy = backup.size / self.elapsed_time_copy
 
-        if self.format == Format.PACKAGE.value or self.format == Format.ENCRYPTED_PACKAGE.value:
+        if self.format == Format.PACKAGE.value or self.format == Format.ENCRYPTED_PACKAGE.value or self.format == Format.COMPRESSED_PACKAGE.value:
             pack_start_time = datetime.now()
             old_cwd = os.getcwd()
             os.chdir(backup.directory)
-            new_package = f"{backup.package}.tar.gz"
+            new_package = f"{backup.package}.tar"
             
             if self.encryption_key:
-                log.info(f"Packing and encrypting backup to '{new_package}.gpg'...")
+                log.info(f"Packing and encrypting backup to '{backup.directory}/{new_package}.gpg'...")
                 try:
                     new_package = run_cmd(f"{self.scripts_dir}/pack_and_encrypt.sh {backup.package} {self.encryption_key} {new_package} {backup.incremental_file}")
                 except subprocess.CalledProcessError as e:
                     backup.remove()
                     raise TargetError(f"Packing and encrypting backup failed: {e}: {e.stderr}")
-                log.info(f"Backup successfully packed and encrypted to '{new_package}' path")
+                log.info(f"Backup successfully packed and encrypted to '{backup.directory}/{new_package}' path")
             else:
-                log.info(f"Packing backup to '{new_package}'...")
+                if self.format == Format.COMPRESSED_PACKAGE.value:
+                    new_package += '.gz'
+                    cmd = f'tar -g {backup.incremental_file} -piz -cf {new_package} {backup.package}'
+                else:
+                    cmd = f'tar -g {backup.incremental_file} -pi -cf {new_package} {backup.package}'
+                
+                log.info(f"Packing backup to '{backup.directory}/{new_package}'...")
                 try:
-                    run_cmd(f'tar -g {backup.incremental_file} -piz -cf {new_package} {backup.package}')
+                    run_cmd(cmd)
                 except subprocess.CalledProcessError as e:
                     backup.remove()
                     remove_file_or_dir(new_package)
                     raise TargetError(f"Packing backup failed: {e}: {e.stderr}")
-                log.info(f"Backup successfully packed to '{new_package}' path")
+                log.info(f"Backup successfully packed to '{backup.directory}/{new_package}' path")
 
-            self.elapsed_time_pack = round((datetime.now() - pack_start_time).seconds, 2)
+            self.elapsed_time_pack = (datetime.now() - pack_start_time).seconds
             backup.remove()
             backup = Backup(os.path.join(backup.directory, new_package))
             os.chdir(old_cwd)
@@ -739,12 +747,12 @@ class PullTarget(Target):
         cmd = f'{base_cmd} {source_args} {new_backup_path}' 
         os.makedirs(new_backup_path, exist_ok=True)
         log.info(f"Pulling target files to '{new_backup_path}' path...")
-        log.debug(f"Used rsync cmd: {cmd}")
+        log.debug(f"rsync cmd: {cmd}")
         
         try:
             copy_start_time = datetime.now()
             result = run_cmd(cmd)  # TODO - add reaction to 24 code (some file vanished) log.warning(f"Some files vanished in source during syncing: [{result.code}] {result.output}")
-            self.elapsed_time_copy = round((datetime.now() - copy_start_time).seconds, 2)
+            self.elapsed_time_copy = (datetime.now() - copy_start_time).seconds
         except subprocess.CalledProcessError as e:
             remove_file_or_dir(new_backup_path)
             log.error(f"Pulling target files failed: [{e.returncode}] {e}: {e.stderr}")
@@ -754,7 +762,7 @@ class PullTarget(Target):
             with open(self.stats_file, 'w') as f:
                 f.writelines(result)
         
-        log.info(f"Backup pulled and saved in '{new_backup_path}' path")
+        log.info(f"Backup saved in '{new_backup_path}' path")
         return super().create_backup(new_backup_path)
     
     def send_wol_packet(self) -> None:
