@@ -1036,7 +1036,7 @@ if __name__ == "__main__":
                 if type(target) == PullTarget and target.wake_on_lan: 
                     target.send_wol_packet()
                 target.create_backup()
-                state.set_target_status(target, f'({get_display_size(target.backup.size)}) {target.backup.path}', Nagios.OK, target.elapsed_time_copy, target.elapsed_time_pack, target.transfer_speed_copy, target.transfer_speed_pack)
+                state.set_target_status(target, f'({get_display_size(target.backup.size)}) {target.backup.package}', Nagios.OK, target.elapsed_time_copy, target.elapsed_time_pack, target.transfer_speed_copy, target.transfer_speed_pack)
             elif args.action == Action.CLEANUP.value:
                 total_recovered_space = 0
                 total_removed_backups = 0
