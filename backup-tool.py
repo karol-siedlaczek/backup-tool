@@ -185,12 +185,12 @@ class State():
         curr_status = self.state[str(target_name)]['status']
         print(f'[{target_name}] {curr_status}: {msg}')
         
-        if curr_status == Nagios.CRITICAL.name:
-            log.error(msg)
-        elif curr_status == Nagios.WARNING.name:
-            log.warning(msg)
-        else:
-            log.info(msg)
+        # if curr_status == Nagios.CRITICAL.name: # TODO this is also done in TargetError,TargetException etc. classes
+        #     log.error(msg)
+        # elif curr_status == Nagios.WARNING.name:
+        #     log.warning(msg)
+        # else:
+        log.info(msg)
         
     def remove_undefined_targets(self, defined_targets) -> None:
         targets_in_state_file = list(self.state.keys())
@@ -864,7 +864,10 @@ class PushTarget(Target):
                 
                 log.info(f"Moving files from '{self.work_dir}' working directory to '{new_backup_path}' path...")
                 try:
-                    run_cmd(f'mv {self.work_dir}/* {new_backup_path}')
+                    copy_start_time = datetime.now()
+                    run_cmd(f'mv {self.work_dir}/ {new_backup_path}')
+                    self.elapsed_time_copy = (datetime.now() - copy_start_time).seconds
+                    remove_file_or_dir(self.work_dir)
                 except subprocess.CalledProcessError as e:
                     remove_file_or_dir(new_backup_path)
                     raise TargetError(f"Moving files from '{self.work_dir}' working directory to '{new_backup_path}' failed: {e}: {e.stderr}")
