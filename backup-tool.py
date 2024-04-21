@@ -103,22 +103,18 @@ class TargetException(Exception):
 class TargetError(TargetException):
     def __init__(self, msg) -> None:
         super().__init__(Nagios.CRITICAL)
-        log.error(msg)
 
 class TargetWarning(TargetException):
     def __init__(self, msg) -> None:
         super().__init__(Nagios.WARNING)
-        log.warning(msg)
 
 class TargetSkipException(TargetException):
     def __init__(self, msg) -> None:
         super().__init__(Nagios.OK)
-        log.info(msg)
 
 class TargetCleanupError(TargetException):
     def __init__(self, msg) -> None:
         super().__init__(Nagios.CRITICAL)
-        log.error(msg)
 
 class InfluxServer():  # TODO - Setup pushing stats to influx
     __slots__ = ['client']
@@ -185,12 +181,12 @@ class State():
         curr_status = self.state[str(target_name)]['status']
         print(f'[{target_name}] {curr_status}: {msg}')
         
-        # if curr_status == Nagios.CRITICAL.name: # TODO this is also done in TargetError,TargetException etc. classes
-        #     log.error(msg)
-        # elif curr_status == Nagios.WARNING.name:
-        #     log.warning(msg)
-        # else:
-        log.info(msg)
+        if curr_status == Nagios.CRITICAL.name:
+            log.error(msg)
+        elif curr_status == Nagios.WARNING.name:
+            log.warning(msg)
+        else:
+            log.info(msg)
         
     def remove_undefined_targets(self, defined_targets) -> None:
         targets_in_state_file = list(self.state.keys())
@@ -879,7 +875,7 @@ class PushTarget(Target):
         elif files_in_workdir:
             raise TargetWarning(f"Backup should not be created but found some files in '{self.work_dir}' working directory")
         else:
-            raise TargetSkipException(f"Found latest backup from '{latest_backup.display_date}' created {format_hours_to_ago(last_backup_hours_ago)} ago, frequency is {format_hours_to_ago(self.frequency)}, backup creation skipped")
+            raise TargetSkipException(f"Found latest backup from '{latest_backup.date}' created {format_hours_to_ago(last_backup_hours_ago)} ago, frequency is {format_hours_to_ago(self.frequency)}, backup creation skipped")
 
 
 def remove_file_or_dir(path) -> None:
