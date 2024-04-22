@@ -1007,7 +1007,7 @@ if __name__ == "__main__":
         log.info(f'[{args.action.upper()}] Start pushing stats to {influx_host}:{influx_port}')
         try:
             influxdb = InfluxServer(influx_host, influx_port, common_conf['influx']['user'], common_conf['influx']['password_file'], common_conf['influx']['database'])
-            point = influxdb.client.write()
+            #point = influxdb.client.write()
         except (OSError, FileNotFoundError, ConnectionError) as e:
             print(f"ERROR: Connection to influx server failed: {e}")
             log.error(f"ERROR: Connection to influx server failed: {e}")
