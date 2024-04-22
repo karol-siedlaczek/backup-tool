@@ -886,13 +886,13 @@ def remove_file_or_dir(path) -> None:
 
 def parse_args():
     parser = argparse.ArgumentParser(description='Backup script', add_help=False)
-    parser.add_argument('action', choices=Defaults.list(Action))
+    parser.add_argument('action', choices=[e.value for e in Action])
     action = parser.parse_known_args()[0].action
     parser.add_argument('-v', '--verbose', 
                         action='count', 
                         default=1,
                         help=f'Default verbose level is 1 (INFO)')
-    if action != 'push-stats':
+    if action != Action.PUSH_STATS.value:
         parser.add_argument('-t', '--targets',
                             required=True,
                             nargs='+',
@@ -905,12 +905,12 @@ def parse_args():
                             default=False,
                             action='store_true',
                             help=f'Disable sending state of this iteration to NSCA server defined in {CONFIG_FILE}')
-    if action == 'cleanup':
+    if action == Action.CLEANUP.value:
         parser.add_argument('--force',
                             default=False,
                             action='store_true',
                             help=f'Clean backups to 0 backups, even if limits are to small, no matter what')
-    elif action == 'run':
+    elif action == Action.RUN.value:
         parser.add_argument('--statsFile',
                             type=str,
                             help=f'Redirect rsync logs to file pointed by this argument')
@@ -1007,6 +1007,7 @@ if __name__ == "__main__":
         log.info(f'[{args.action.upper()}] Start pushing stats to {influx_host}:{influx_port}')
         try:
             influxdb = InfluxServer(influx_host, influx_port, common_conf['influx']['user'], common_conf['influx']['password_file'], common_conf['influx']['database'])
+            point = influxdb.client.write()
         except (OSError, FileNotFoundError, ConnectionError) as e:
             print(f"ERROR: Connection to influx server failed: {e}")
             log.error(f"ERROR: Connection to influx server failed: {e}")
