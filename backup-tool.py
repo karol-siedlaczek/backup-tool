@@ -21,6 +21,9 @@ import logging
 
 CONFIG_FILE = '/etc/backup-tool/backup-tool.yaml'
 # TODO
+# Move cleanup to separate method
+# Add method to push stats (influx)
+# Change getting size of backup during cleanup (do not calcuate again, just get_total_size - latest_backup.size <- deleted )
 # c - create, g - list for incremental, p - preserve permissions, 
 # z - compress to gzip, f - file to backup, i - ignore zero-blocks, O - extract fields to stdio
 
