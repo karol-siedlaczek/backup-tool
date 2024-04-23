@@ -9,6 +9,7 @@ import yaml
 import math
 import shlex
 import argparse
+from requests import packages
 from enum import Enum
 from glob import glob
 from influxdb import InfluxDBClient
@@ -120,13 +121,14 @@ class InfluxServer():  # TODO - Setup pushing stats to influx
     __slots__ = ['client']
     
     def __init__(self, host, port, user, password_file, database) -> None:
+        packages.urllib3.disable_warnings()
         if not os.path.isfile(password_file):
             raise FileNotFoundError(f"File with password to connect {host}:{port} influx server does not exist or not valid file")
         elif os.stat(password_file).st_size == 0:
             raise OSError(f"File with password to connect {host}:{port} influx server is empty, provide single line with password")
         with open(password_file, 'r') as f:
             password = f.read().strip()
-        self.client = InfluxDBClient(host, port, user, password, database)
+        self.client = InfluxDBClient(host, port, user, password, database, ssl=True, verify_ssl=False, )
         self.client.ping()  
     
 class NagiosServer():
@@ -1007,7 +1009,31 @@ if __name__ == "__main__":
         log.info(f'[{args.action.upper()}] Start pushing stats to {influx_host}:{influx_port}')
         try:
             influxdb = InfluxServer(influx_host, influx_port, common_conf['influx']['user'], common_conf['influx']['password_file'], common_conf['influx']['database'])
+            run_stats = None 
+            points = []
+            with open(common_conf.get('files').get('run_state'), "r") as f:
+                run_stats = yaml.safe_load(f)
+            for target, stats in run_stats.items():
+                print(target)
+                print(stats)
+                copy_stats = stats.get('times').get('copy')
+                pack_stats = stats.get('times').get('pack')
+                points.append({
+                    'measurement': 'run',
+                    'tags': {
+                        'target': target
+                    },
+                    'fields': {
+                        'status': stats.get('status'),
+                        'copy_duration_seconds': copy_stats.get('duration'),
+                        'copy_transfer_speed_bytes': copy_stats.get('transfer_speed'),
+                        'pack_duration_seconds': pack_stats.get('duration'),
+                        'pack_transfer_speed_bytes': pack_stats.get('transfer_speed')
+                    }
+                })
             #point = influxdb.client.write()
+            print(points)
+            influxdb.client.write_points(points)
         except (OSError, FileNotFoundError, ConnectionError) as e:
             print(f"ERROR: Connection to influx server failed: {e}")
             log.error(f"ERROR: Connection to influx server failed: {e}")
