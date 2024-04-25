@@ -698,6 +698,49 @@ class Target():
             self.transfer_speed_pack = self.backup.size / self.elapsed_time_pack
         return backup
     
+    def cleanup():
+        elif target.max_size:
+                    if total_size >= target.max_size:
+                        latest_backup = target.get_latest_backup()
+                        oldest_backup = target.get_oldest_backup()
+                        
+                        log.info(f"Start cleanup, current total size over limit ({get_display_size(total_size)} / {target.display_max_size})")
+
+                        while target.max_size - total_size <= latest_backup.size * 1.5:  # Directory needs to have at least 150% free space of latest backup size
+                            if target.get_backups_num() == 1 and not args.force:
+                                raise TargetCleanupError(f"Cleanup aborted, only 1 backup left but current max_size limit ({target.display_max_size}) is not enough for next backup*1.5 (~{get_display_size(latest_backup.size*1.5)}), consider increasing the limit or use -f/--force are to process cleanup")
+                            log.info(f"Backup '{oldest_backup}' removing...")
+                            oldest_backup.remove()
+                            log.info(f"Backup '{oldest_backup}' removed")
+                            total_removed_backups += 1
+                            total_recovered_space += oldest_backup.size
+                            total_size -= oldest_backup.size
+                            oldest_backup = target.get_oldest_backup()
+                        msg = f'Cleanup finished, removed {total_removed_backups} backup/s, recovered {get_display_size(total_recovered_space)} ({get_display_size(target.get_backups_size())} / {target.display_max_size})'
+                        state.set_target_status(target, msg, Nagios.OK, total_recovered_space, total_removed_backups, total_size, target.max_size, target.max_num)
+                    else:
+                        msg = f'No cleanup needed ({get_display_size(total_size)} / {get_display_size(target.max_size)})'
+                        state.set_target_status(target, msg, Nagios.OK, total_recovered_space, total_removed_backups, total_size, target.max_size, target.max_num)
+                elif target.max_num:
+                    if total_num >= target.max_num:                      
+                        log.info(f"Start cleanup, max number of backups exceeded ({total_num} / {target.max_num})")
+                        
+                        while total_num >= target.max_num:
+                            if total_num == 1 and not args.force:
+                                raise TargetCleanupError(f"Cleanup aborted, only 1 backup left and current max_num limit allows only for {target.max_num} backup, directory cannot be empty, consider increasing the limit or use -f/--force are to process cleanup")
+                            oldest_backup = target.get_oldest_backup()
+                            log.info(f"Backup '{oldest_backup}' removing...")
+                            oldest_backup.remove()
+                            log.info(f"Backup '{oldest_backup}' removed")
+                            total_removed_backups += 1
+                            total_num -= 1
+                            total_recovered_space += oldest_backup.size
+                        msg = f'Cleanup finished, removed {total_removed_backups} backup/s, recovered {get_display_size(total_recovered_space)} ({total_num} / {target.max_num})'
+                        state.set_target_status(target, msg, Nagios.OK, total_recovered_space, total_removed_backups, total_size, target.max_size, target.max_num)
+                    else:
+                        msg = f'No cleanup needed ({total_num} / {target.max_num})'
+                        state.set_target_status(target, msg, Nagios.OK, 0, 0, total_size, target.max_size, target.max_num)
+    
     def __str__(self) -> str:
         return self.name
         
@@ -1067,54 +1110,15 @@ if __name__ == "__main__":
                 target.create_backup()
                 state.set_target_status(target, f'({get_display_size(target.backup.size)}) {target.backup.package}', Nagios.OK, target.elapsed_time_copy, target.elapsed_time_pack, target.transfer_speed_copy, target.transfer_speed_pack)
             elif args.action == Action.CLEANUP.value:
-                total_recovered_space = 0
-                total_removed_backups = 0
-                total_num = target.get_backups_num()
-                total_size = target.get_backups_size()
+                #total_recovered_space = 0
+                #total_removed_backups = 0
+                #total_num = target.get_backups_num()
+                #total_size = target.get_backups_size()
                 
-                if total_num == 0: 
+                if target.get_backups_num() == 0: 
                     state.set_target_status(target, 'No found any backup', Nagios.WARNING, 0, 0, target.max_size)
-                elif target.max_size:
-                    if total_size >= target.max_size:
-                        latest_backup = target.get_latest_backup()
-                        oldest_backup = target.get_oldest_backup()
-                        
-                        log.info(f"Start cleanup, current total size over limit ({get_display_size(total_size)} / {target.display_max_size})")
-
-                        while target.max_size - total_size <= latest_backup.size * 1.5:  # Directory needs to have at least 150% free space of latest backup size
-                            if target.get_backups_num() == 1 and not args.force:
-                                raise TargetCleanupError(f"Cleanup aborted, only 1 backup left but current max_size limit ({target.display_max_size}) is not enough for next backup*1.5 (~{get_display_size(latest_backup.size*1.5)}), consider increasing the limit or use -f/--force are to process cleanup")
-                            log.info(f"Backup '{oldest_backup}' removing...")
-                            oldest_backup.remove()
-                            log.info(f"Backup '{oldest_backup}' removed")
-                            total_removed_backups += 1
-                            total_recovered_space += oldest_backup.size
-                            oldest_backup = target.get_oldest_backup()
-                            total_size = target.get_backups_size()
-                        msg = f'Cleanup finished, removed {total_removed_backups} backup/s, recovered {get_display_size(total_recovered_space)} ({get_display_size(target.get_backups_size())} / {target.display_max_size})'
-                        state.set_target_status(target, msg, Nagios.OK, total_recovered_space, total_removed_backups, total_size, target.max_size, target.max_num)
-                    else:
-                        msg = f'No cleanup needed ({get_display_size(total_size)} / {get_display_size(target.max_size)})'
-                        state.set_target_status(target, msg, Nagios.OK, total_recovered_space, total_removed_backups, total_size, target.max_size, target.max_num)
-                elif target.max_num:
-                    if total_num >= target.max_num:                      
-                        log.info(f"Start cleanup, max number of backups exceeded ({total_num} / {target.max_num})")
-                        
-                        while total_num >= target.max_num:
-                            if total_num == 1 and not args.force:
-                                raise TargetCleanupError(f"Cleanup aborted, only 1 backup left and current max_num limit allows only for {target.max_num} backup, directory cannot be empty, consider increasing the limit or use -f/--force are to process cleanup")
-                            oldest_backup = target.get_oldest_backup()
-                            log.info(f"Backup '{oldest_backup}' removing...")
-                            oldest_backup.remove()
-                            log.info(f"Backup '{oldest_backup}' removed")
-                            total_removed_backups += 1
-                            total_recovered_space += oldest_backup.size
-                            total_num = target.get_backups_num()
-                        msg = f'Cleanup finished, removed {total_removed_backups} backup/s, recovered {get_display_size(total_recovered_space)} ({total_num} / {target.max_num})'
-                        state.set_target_status(target, msg, Nagios.OK, total_recovered_space, total_removed_backups, total_size, target.max_size, target.max_num)
-                    else:
-                        msg = f'No cleanup needed ({total_num} / {target.max_num})'
-                        state.set_target_status(target, msg, Nagios.OK, 0, 0, total_size, target.max_size, target.max_num)
+                else:
+                    target.cleanup()
             else:
                 raise TargetException(f"Action '{args.action}' is not defined")
         except catch_exception_class as e:
