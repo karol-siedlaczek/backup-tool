@@ -20,12 +20,6 @@ import subprocess
 import logging
 
 CONFIG_FILE = '/etc/backup-tool/backup-tool.yaml'
-# TODO
-# Move cleanup to separate method
-# Add method to push stats (influx)
-# Change getting size of backup during cleanup (do not calcuate again, just get_total_size - latest_backup.size <- deleted )
-# c - create, g - list for incremental, p - preserve permissions, 
-# z - compress to gzip, f - file to backup, i - ignore zero-blocks, O - extract fields to stdio
 
 class Defaults(Enum):
     @staticmethod
@@ -121,9 +115,9 @@ class TargetCleanupError(TargetException):
         super().__init__(Nagios.CRITICAL)
 
 class InfluxServer():  # TODO - Setup pushing stats to influx
-    __slots__ = ['client']
+    __slots__ = ['host', 'port', 'client']
     
-    def __init__(self, host, port, user, password_file, database) -> None:
+    def __init__(self, host, port, user, password_file, database, verify_ssl=True) -> None:
         packages.urllib3.disable_warnings()
         if not os.path.isfile(password_file):
             raise FileNotFoundError(f"File with password to connect {host}:{port} influx server does not exist or not valid file")
@@ -131,8 +125,64 @@ class InfluxServer():  # TODO - Setup pushing stats to influx
             raise OSError(f"File with password to connect {host}:{port} influx server is empty, provide single line with password")
         with open(password_file, 'r') as f:
             password = f.read().strip()
-        self.client = InfluxDBClient(host, port, user, password, database, ssl=True, verify_ssl=False, )
-        self.client.ping()  
+        self.client = InfluxDBClient(host, port, user, password, database, ssl=True, verify_ssl=verify_ssl)
+        self.client.ping()
+        self.host = host
+        self.port = port
+        
+    def push_run_stats(self, run_stats_file) -> None:        
+        with open(run_stats_file, "r") as f:
+            run_stats = yaml.safe_load(f)
+            
+        points = []
+        log.debug(f'Start pushing run stats to {self.host}:{self.port}')
+        
+        for target, stats in run_stats.items():
+            copy_stats = stats.get('times').get('copy')
+            pack_stats = stats.get('times').get('pack')
+            points.append({
+                'measurement': 'run',
+                'tags': {
+                    'target': target
+                },
+                'fields': {
+                    'status': stats.get('status'),
+                    'msg': stats.get('msg'),
+                    'copy_duration_seconds': copy_stats.get('duration'),
+                    'copy_transfer_speed_bytes': copy_stats.get('transfer_speed'),
+                    'pack_duration_seconds': pack_stats.get('duration'),
+                    'pack_transfer_speed_bytes': pack_stats.get('transfer_speed')
+                }
+            })
+        self.client.write_points(points)
+        log.debug(f'Run stats pushed to {self.host}:{self.port}')
+    
+    def push_cleanup_stats(self, cleanup_stats_file) -> None:     
+        with open(cleanup_stats_file, "r") as f:
+            cleanup_stats = yaml.safe_load(f)
+        self.client
+        points = []
+        log.debug(f'Start pushing cleanup stats to {self.host}:{self.port}')
+        
+        for target, stats in cleanup_stats.items():
+            points.append({
+                'measurement': 'cleanup',
+                'tags': {
+                    'target': target
+                },
+                'fields': {
+                    'status': stats.get('status'),
+                    'msg': stats.get('msg'),
+                    'max_num': stats.get('max_num'),
+                    'total_size': stats.get('total_size'),
+                    'max_size': stats.get('max_size'),
+                    'recovered_space': stats.get('recovered_space'),
+                    'removed_backups': stats.get('removed_backups')
+                }
+            })
+        self.client.write_points(points)
+        log.debug(f'Cleanup stats pushed to {self.host}:{self.port}')
+    
     
 class NagiosServer():
     __slots__ = ['bin', 'host', 'port', 'host_service', 'service']
@@ -263,7 +313,7 @@ class CleanupState(State):
 
 
 class Backup():
-    __slots__ = ['path', 'directory', 'package', 'date', 'size', 'incremental_file', 'manifest_file']
+    __slots__ = ['path', 'directory', 'package', 'date', 'incremental_file', 'manifest_file']
     DATE_FORMAT = '%Y-%m-%d_%H-%M'
     
     def __init__(self, path) -> None:
@@ -273,14 +323,19 @@ class Backup():
         self.package = package
         
         if self.__is_valid_backup():
+            if not os.path.exists(path):
+                raise FileNotFoundError(f"Backup '{path}' does not exists")
             date_regex = r'([\d]{4}-[\d]{2}-[\d]{2}_[\d]{2}-[\d]{2})'
             self.date = datetime.strptime(re.search(date_regex, package).group(1), self.DATE_FORMAT)
-            self.size = get_path_size(self.path)
             self.incremental_file = os.path.join(self.directory, 'incremental.snapshot')
             self.manifest_file = None
         else:
             raise NameError(f"File '{path}' has not valid filename for backup")
-       
+    
+    @property
+    def size(self) -> int:
+        return get_path_size(self.path)
+    
     @property
     def display_date(self) -> str:
         return self.date.strftime(Backup.DATE_FORMAT)
@@ -698,48 +753,51 @@ class Target():
             self.transfer_speed_pack = self.backup.size / self.elapsed_time_pack
         return backup
     
-    def cleanup():
-        elif target.max_size:
-                    if total_size >= target.max_size:
-                        latest_backup = target.get_latest_backup()
-                        oldest_backup = target.get_oldest_backup()
-                        
-                        log.info(f"Start cleanup, current total size over limit ({get_display_size(total_size)} / {target.display_max_size})")
+    def cleanup(self) -> None:
+        def remove_oldest_backup() -> Backup:
+            oldest_backup = self.get_oldest_backup()
+            log.info(f"Removing '{oldest_backup}' oldest backup...")
+            oldest_backup.remove()
+            log.info(f"Oldest backup '{oldest_backup}' removed")
+            return oldest_backup
+        
+        total_recovered_space = 0
+        total_removed_backups = 0
+            
+        if self.max_size:
+            total_size = self.get_backups_size()
+            
+            if total_size >= self.max_size:
+                latest_backup = target.get_latest_backup()
+                log.info(f"Start cleanup, current total size over limit ({get_display_size(total_size)} / {self.display_max_size})")
 
-                        while target.max_size - total_size <= latest_backup.size * 1.5:  # Directory needs to have at least 150% free space of latest backup size
-                            if target.get_backups_num() == 1 and not args.force:
-                                raise TargetCleanupError(f"Cleanup aborted, only 1 backup left but current max_size limit ({target.display_max_size}) is not enough for next backup*1.5 (~{get_display_size(latest_backup.size*1.5)}), consider increasing the limit or use -f/--force are to process cleanup")
-                            log.info(f"Backup '{oldest_backup}' removing...")
-                            oldest_backup.remove()
-                            log.info(f"Backup '{oldest_backup}' removed")
-                            total_removed_backups += 1
-                            total_recovered_space += oldest_backup.size
-                            total_size -= oldest_backup.size
-                            oldest_backup = target.get_oldest_backup()
-                        msg = f'Cleanup finished, removed {total_removed_backups} backup/s, recovered {get_display_size(total_recovered_space)} ({get_display_size(target.get_backups_size())} / {target.display_max_size})'
-                        state.set_target_status(target, msg, Nagios.OK, total_recovered_space, total_removed_backups, total_size, target.max_size, target.max_num)
-                    else:
-                        msg = f'No cleanup needed ({get_display_size(total_size)} / {get_display_size(target.max_size)})'
-                        state.set_target_status(target, msg, Nagios.OK, total_recovered_space, total_removed_backups, total_size, target.max_size, target.max_num)
-                elif target.max_num:
-                    if total_num >= target.max_num:                      
-                        log.info(f"Start cleanup, max number of backups exceeded ({total_num} / {target.max_num})")
-                        
-                        while total_num >= target.max_num:
-                            if total_num == 1 and not args.force:
-                                raise TargetCleanupError(f"Cleanup aborted, only 1 backup left and current max_num limit allows only for {target.max_num} backup, directory cannot be empty, consider increasing the limit or use -f/--force are to process cleanup")
-                            oldest_backup = target.get_oldest_backup()
-                            log.info(f"Backup '{oldest_backup}' removing...")
-                            oldest_backup.remove()
-                            log.info(f"Backup '{oldest_backup}' removed")
-                            total_removed_backups += 1
-                            total_num -= 1
-                            total_recovered_space += oldest_backup.size
-                        msg = f'Cleanup finished, removed {total_removed_backups} backup/s, recovered {get_display_size(total_recovered_space)} ({total_num} / {target.max_num})'
-                        state.set_target_status(target, msg, Nagios.OK, total_recovered_space, total_removed_backups, total_size, target.max_size, target.max_num)
-                    else:
-                        msg = f'No cleanup needed ({total_num} / {target.max_num})'
-                        state.set_target_status(target, msg, Nagios.OK, 0, 0, total_size, target.max_size, target.max_num)
+                while self.max_size - total_size <= latest_backup.size * 1.5:  # Directory needs to have at least 150% free space of latest backup size
+                    if target.get_backups_num() == 1 and not args.force:
+                        raise TargetCleanupError(f"Cleanup aborted, only 1 backup left but current max_size limit ({self.display_max_size}) is not enough for next backup*1.5 (~{get_display_size(latest_backup.size*1.5)}), consider increasing the limit or use -f/--force are to process cleanup")
+                    oldest_backup_size = remove_oldest_backup().size
+                    total_removed_backups += 1
+                    total_recovered_space += oldest_backup_size
+                    total_size -= oldest_backup_size
+                msg = f'Cleanup finished, removed {total_removed_backups} backup/s, recovered {get_display_size(total_recovered_space)} ({get_display_size(total_size)} / {self.display_max_size})'
+            else:
+                msg = f'No cleanup needed ({get_display_size(total_size)} / {get_display_size(self.max_size)})'
+        else:
+            total_num = self.get_backups_num()
+            
+            if total_num >= self.max_num:                      
+                log.info(f"Start cleanup, max number of backups exceeded ({total_num} / {self.max_num})")
+                
+                while total_num >= self.max_num:
+                    if total_num == 1 and not args.force:
+                        raise TargetCleanupError(f"Cleanup aborted, only 1 backup left and current max_num limit allows only for {self.max_num} backup, directory cannot be empty, consider increasing the limit or use -f/--force are to process cleanup")
+                    oldest_backup_size = remove_oldest_backup().size
+                    total_removed_backups += 1
+                    total_num -= 1
+                    total_recovered_space += oldest_backup_size
+                msg = f'Cleanup finished, removed {total_removed_backups} backup/s, recovered {get_display_size(total_recovered_space)} ({total_num} / {self.max_num})'
+            else:
+                msg = f'No cleanup needed ({total_num} / {self.max_num})'
+        return msg, total_recovered_space, total_removed_backups, total_size
     
     def __str__(self) -> str:
         return self.name
@@ -940,6 +998,10 @@ def parse_args():
                         action='count', 
                         default=1,
                         help=f'Default verbose level is 1 (INFO)')
+    parser.add_argument('--noPushStats',
+                        default=False,
+                        action='store_true',
+                        help=f'Disable sending stats to influx defined in {CONFIG_FILE}')
     if action != Action.PUSH_STATS.value:
         parser.add_argument('-t', '--targets',
                             required=True,
@@ -1020,11 +1082,6 @@ def get_logger(log_file, verbose_level) -> None:
     return logging.getLogger('backup-tool')
 
 def run_cmd(cmd, check=True) -> str:
-    # process = subprocess.Popen(shlex.split(cmd), stdin=subprocess.DEVNULL, stderr=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
-    # stdout, stderr = process.communicate()
-    # if check and stderr:
-    #     raise subprocess.CalledProcessError(cmd=cmd, stderr=stderr, returncode=process.returncode)
-    # return stdout if stdout else stderr
     process = subprocess.run(shlex.split(cmd), stdin=subprocess.DEVNULL, stderr=subprocess.PIPE, stdout=subprocess.PIPE, check=check, text=True)
     return process.stdout or process.stderr
 
@@ -1038,94 +1095,64 @@ if __name__ == "__main__":
     log = get_logger(common_conf['files']['log'], args.verbose)
     catch_exception_class = TargetException if args.verbose > 1 else Exception
     target = '-'
-
-    if args.action == 'cleanup':
-        state = CleanupState(common_conf['files']['cleanup_state'])
-        nagios_service = common_conf['nagios']['cleanup_service']
-    else:
-        state = RunState(common_conf['files']['run_state'])
-        nagios_service = common_conf['nagios']['run_service']
     
-    nagios = NagiosServer(common_conf['nagios']['host'], common_conf['nagios']['port'], common_conf['nagios']['host_service'], nagios_service)
+    if not args.action == Action.PUSH_STATS.value:
+        if args.action == Action.CLEANUP.value:
+            state = CleanupState(common_conf['files']['cleanup_state'])
+            nagios_service = common_conf['nagios']['cleanup_service']
+        else:
+            state = RunState(common_conf['files']['run_state'])
+            nagios_service = common_conf['nagios']['run_service']
+        nagios = NagiosServer(common_conf['nagios']['host'], common_conf['nagios']['port'], common_conf['nagios']['host_service'], nagios_service)
 
-    if args.action == Action.PUSH_STATS.value:  # TODO
-        influx_host = common_conf['influx']['host']
-        influx_port = common_conf['influx']['port']   
-        print(f'[{args.action.upper()}] Start pushing stats to {influx_host}:{influx_port}')
-        log.info(f'[{args.action.upper()}] Start pushing stats to {influx_host}:{influx_port}')
+        if 'all' in args.targets:
+            args.targets = list(conf.get('targets'))
+    
+        for target in args.targets:
+            try:
+                target_conf = conf['targets'].get(target)
+                if not target_conf: 
+                    raise TargetError(f"Target not defined in '{CONFIG_FILE}' conf file")
+                
+                if target_conf.get('type') == BackupType.PUSH.value:
+                    target = PushTarget(target, target_conf, conf.get('default'), common_conf['dirs']['backups'], common_conf['dirs']['scripts'], common_conf['dirs']['work'])
+                elif target_conf.get('type') == BackupType.PULL.value:
+                    target = PullTarget(target, target_conf, conf.get('default'), common_conf['dirs']['backups'], common_conf['dirs']['scripts'], args.statsFile if hasattr(args, 'statsFile') else None)
+                else:
+                    raise TargetException(f"Type '{target_conf.get('type')}' is not defined")
+                
+                log.info(f'[{args.action.upper()}] Start processing target')
+
+                if args.action == Action.RUN.value:
+                    if type(target) == PullTarget and target.wake_on_lan: 
+                        target.send_wol_packet()
+                    target.create_backup()
+                    state.set_target_status(target, f'({get_display_size(target.backup.size)}) {target.backup.package}', Nagios.OK, target.elapsed_time_copy, target.elapsed_time_pack, target.transfer_speed_copy, target.transfer_speed_pack)
+                elif args.action == Action.CLEANUP.value:                
+                    if target.get_backups_num() == 0: 
+                        state.set_target_status(target, 'No found any backup', Nagios.WARNING, 0, 0, target.max_size)
+                    else:
+                        msg, total_recovered_space, total_removed_backups, total_size = target.cleanup()
+                        state.set_target_status(target, msg, Nagios.OK, total_recovered_space, total_removed_backups, total_size)
+                else:
+                    raise TargetException(f"Action '{args.action}' is not defined")
+            except catch_exception_class as e:
+                code = e.code if hasattr(e, 'code') else Nagios.CRITICAL
+                state.set_target_status(target, str(e), code)
+            
+        state.remove_undefined_targets(list(conf["targets"]))
+
+        if not args.noReport:
+            nagios.send_report_to_nagios(getattr(Nagios, str(state.get_most_failure_status())), state.get_summary())
+    
+    if not args.noPushStats:
         try:
-            influxdb = InfluxServer(influx_host, influx_port, common_conf['influx']['user'], common_conf['influx']['password_file'], common_conf['influx']['database'])
-            run_stats = None 
-            points = []
-            with open(common_conf.get('files').get('run_state'), "r") as f:
-                run_stats = yaml.safe_load(f)
-            for target, stats in run_stats.items():
-                print(target)
-                print(stats)
-                copy_stats = stats.get('times').get('copy')
-                pack_stats = stats.get('times').get('pack')
-                points.append({
-                    'measurement': 'run',
-                    'tags': {
-                        'target': target
-                    },
-                    'fields': {
-                        'status': stats.get('status'),
-                        'copy_duration_seconds': copy_stats.get('duration'),
-                        'copy_transfer_speed_bytes': copy_stats.get('transfer_speed'),
-                        'pack_duration_seconds': pack_stats.get('duration'),
-                        'pack_transfer_speed_bytes': pack_stats.get('transfer_speed')
-                    }
-                })
-            #point = influxdb.client.write()
-            print(points)
-            influxdb.client.write_points(points)
-        except (OSError, FileNotFoundError, ConnectionError) as e:
+            influxdb = InfluxServer(common_conf['influx']['host'], common_conf['influx']['port'], common_conf['influx']['user'], common_conf['influx']['password_file'], common_conf['influx']['database'], common_conf['influx'].get('verify_ssl'))
+            if Action.RUN.value or Action.PUSH_STATS.value:
+                influxdb.push_run_stats(common_conf['files']['run_state'])
+            if Action.CLEANUP.value:
+                influxdb.push_cleanup_stats(common_conf['files']['cleanup_state'])
+        except (OSError, FileNotFoundError, ConnectionError, FileNotFoundError) as e:
             print(f"ERROR: Connection to influx server failed: {e}")
             log.error(f"ERROR: Connection to influx server failed: {e}")
             sys.exit(Nagios.WARNING)
-        sys.exit(Nagios.OK)
-    
-    if 'all' in args.targets:
-        args.targets = list(conf.get('targets'))
-    
-    for target in args.targets:
-        try:
-            target_conf = conf['targets'].get(target)
-            if not target_conf: 
-                raise TargetError(f"Target not defined in '{CONFIG_FILE}' conf file")
-            
-            if target_conf.get('type') == BackupType.PUSH.value:
-                target = PushTarget(target, target_conf, conf.get('default'), common_conf['dirs']['backups'], common_conf['dirs']['scripts'], common_conf['dirs']['work'])
-            elif target_conf.get('type') == BackupType.PULL.value:
-                target = PullTarget(target, target_conf, conf.get('default'), common_conf['dirs']['backups'], common_conf['dirs']['scripts'], args.statsFile if hasattr(args, 'statsFile') else None)
-            else:
-                raise TargetException(f"Type '{target_conf.get('type')}' is not defined")
-            
-            log.info(f'[{args.action.upper()}] Start processing target')
-
-            if args.action == Action.RUN.value:
-                if type(target) == PullTarget and target.wake_on_lan: 
-                    target.send_wol_packet()
-                target.create_backup()
-                state.set_target_status(target, f'({get_display_size(target.backup.size)}) {target.backup.package}', Nagios.OK, target.elapsed_time_copy, target.elapsed_time_pack, target.transfer_speed_copy, target.transfer_speed_pack)
-            elif args.action == Action.CLEANUP.value:
-                #total_recovered_space = 0
-                #total_removed_backups = 0
-                #total_num = target.get_backups_num()
-                #total_size = target.get_backups_size()
-                
-                if target.get_backups_num() == 0: 
-                    state.set_target_status(target, 'No found any backup', Nagios.WARNING, 0, 0, target.max_size)
-                else:
-                    target.cleanup()
-            else:
-                raise TargetException(f"Action '{args.action}' is not defined")
-        except catch_exception_class as e:
-            code = e.code if hasattr(e, 'code') else Nagios.CRITICAL
-            state.set_target_status(target, str(e), code)
-        
-    state.remove_undefined_targets(list(conf["targets"]))
-
-    if not args.noReport:
-        nagios.send_report_to_nagios(getattr(Nagios, str(state.get_most_failure_status())), state.get_summary())
