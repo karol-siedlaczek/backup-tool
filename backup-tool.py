@@ -148,6 +148,7 @@ class InfluxServer():  # TODO - Setup pushing stats to influx
                 'fields': {
                     'status': stats.get('status'),
                     'msg': stats.get('msg'),
+                    'timestamp': stats.get('timestamp'),
                     'copy_duration_seconds': copy_stats.get('duration'),
                     'copy_transfer_speed_bytes': copy_stats.get('transfer_speed'),
                     'pack_duration_seconds': pack_stats.get('duration'),
@@ -173,6 +174,7 @@ class InfluxServer():  # TODO - Setup pushing stats to influx
                 'fields': {
                     'status': stats.get('status'),
                     'msg': stats.get('msg'),
+                    'timestamp': stats.get('timestamp'),
                     'max_num': stats.get('max_num'),
                     'total_size': stats.get('total_size'),
                     'max_size': stats.get('max_size'),
