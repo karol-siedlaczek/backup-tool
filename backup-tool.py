@@ -1148,9 +1148,9 @@ if __name__ == "__main__":
     if not args.noPushStats:
         try:
             influxdb = InfluxServer(common_conf['influx']['host'], common_conf['influx']['port'], common_conf['influx']['user'], common_conf['influx']['password_file'], common_conf['influx']['database'], common_conf['influx'].get('verify_ssl'))
-            if Action.RUN.value or Action.PUSH_STATS.value:
+            if args.action == Action.RUN.value or args.action == Action.PUSH_STATS.value:
                 influxdb.push_run_stats(common_conf['files']['run_state'])
-            if Action.CLEANUP.value:
+            if args.action == Action.CLEANUP.value:
                 influxdb.push_cleanup_stats(common_conf['files']['cleanup_state'])
         except (OSError, FileNotFoundError, ConnectionError, FileNotFoundError) as e:
             print(f"ERROR: Connection to influx server failed: {e}")
