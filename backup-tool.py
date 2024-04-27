@@ -1132,10 +1132,10 @@ if __name__ == "__main__":
                     state.set_target_status(target, f'({get_display_size(target.backup.size)}) {target.backup.package}', Nagios.OK, target.elapsed_time_copy, target.elapsed_time_pack, target.transfer_speed_copy, target.transfer_speed_pack)
                 elif args.action == Action.CLEANUP.value:                
                     if target.get_backups_num() == 0: 
-                        state.set_target_status(target, 'No found any backup', Nagios.WARNING, 0, 0, target.max_size)
+                        state.set_target_status(target, 'No found any backup', Nagios.WARNING, 0, 0, 0, target.max_size, target.max_num)
                     else:
                         msg, total_recovered_space, total_removed_backups, total_size = target.cleanup()
-                        state.set_target_status(target, msg, Nagios.OK, total_recovered_space, total_removed_backups, total_size)
+                        state.set_target_status(target, msg, Nagios.OK, total_recovered_space, total_removed_backups, total_size, target.max_size, target.max_num)
                 else:
                     raise TargetException(f"Action '{args.action}' is not defined")
             except catch_exception_class as e:
