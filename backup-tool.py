@@ -756,12 +756,13 @@ class Target():
         return backup
     
     def cleanup(self) -> None:
-        def remove_oldest_backup() -> Backup:
+        def remove_oldest_backup() -> int:
             oldest_backup = self.get_oldest_backup()
+            oldest_backup_size = oldest_backup.size
             log.info(f"Removing '{oldest_backup}' oldest backup...")
             oldest_backup.remove()
             log.info(f"Oldest backup '{oldest_backup}' removed")
-            return oldest_backup
+            return oldest_backup_size
         
         total_recovered_space = 0
         total_removed_backups = 0
@@ -772,15 +773,17 @@ class Target():
             if total_size >= self.max_size:
                 latest_backup = target.get_latest_backup()
                 log.info(f"Start cleanup, current total size over limit ({get_display_size(total_size)} / {self.display_max_size})")
-
-                while self.max_size - total_size <= latest_backup.size * 1.5:  # Directory needs to have at least 150% free space of latest backup size
-                    if target.get_backups_num() == 1 and not args.force:
+ 
+                while True: # Directory needs to have at least 150% free space of latest backup size
+                    if total_size + latest_backup.size * 1.2 <= self.max_size:
+                        msg = f'Cleanup finished, removed {total_removed_backups} backup/s, recovered {get_display_size(total_recovered_space)} ({get_display_size(total_size)} / {self.display_max_size})'
+                        break
+                    elif target.get_backups_num() == 1 and not args.force:
                         raise TargetCleanupError(f"Cleanup aborted, only 1 backup left but current max_size limit ({self.display_max_size}) is not enough for next backup*1.5 (~{get_display_size(latest_backup.size*1.5)}), consider increasing the limit or use -f/--force are to process cleanup")
-                    oldest_backup_size = remove_oldest_backup().size
+                    oldest_backup_size = remove_oldest_backup()
                     total_removed_backups += 1
                     total_recovered_space += oldest_backup_size
                     total_size -= oldest_backup_size
-                msg = f'Cleanup finished, removed {total_removed_backups} backup/s, recovered {get_display_size(total_recovered_space)} ({get_display_size(total_size)} / {self.display_max_size})'
             else:
                 msg = f'No cleanup needed ({get_display_size(total_size)} / {get_display_size(self.max_size)})'
         else:
@@ -792,7 +795,7 @@ class Target():
                 while total_num >= self.max_num:
                     if total_num == 1 and not args.force:
                         raise TargetCleanupError(f"Cleanup aborted, only 1 backup left and current max_num limit allows only for {self.max_num} backup, directory cannot be empty, consider increasing the limit or use -f/--force are to process cleanup")
-                    oldest_backup_size = remove_oldest_backup().size
+                    oldest_backup_size = remove_oldest_backup()
                     total_removed_backups += 1
                     total_num -= 1
                     total_recovered_space += oldest_backup_size
