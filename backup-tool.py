@@ -774,7 +774,7 @@ class Target():
                 latest_backup = target.get_latest_backup()
                 log.info(f"Start cleanup, current total size over limit ({get_display_size(total_size)} / {self.display_max_size})")
  
-                while True: # Directory needs to have at least 150% free space of latest backup size
+                while True: # Directory needs to have at least 120% free space of latest backup size
                     if total_size + latest_backup.size * 1.2 <= self.max_size:
                         msg = f'Cleanup finished, removed {total_removed_backups} backup/s, recovered {get_display_size(total_recovered_space)} ({get_display_size(total_size)} / {self.display_max_size})'
                         break
