@@ -114,7 +114,7 @@ class TargetCleanupError(TargetException):
     def __init__(self, msg) -> None:
         super().__init__(Nagios.CRITICAL)
 
-class InfluxServer():  # TODO - Setup pushing stats to influx
+class InfluxServer():
     __slots__ = ['host', 'port', 'client']
     
     def __init__(self, host, port, user, password_file, database, verify_ssl=True) -> None:
@@ -1003,10 +1003,6 @@ def parse_args():
                         action='count', 
                         default=1,
                         help=f'Default verbose level is 1 (INFO)')
-    parser.add_argument('--noPushStats',
-                        default=False,
-                        action='store_true',
-                        help=f'Disable sending stats to influx defined in {CONFIG_FILE}')
     if action != Action.PUSH_STATS.value:
         parser.add_argument('-t', '--targets',
                             required=True,
@@ -1028,7 +1024,7 @@ def parse_args():
     elif action == Action.RUN.value:
         parser.add_argument('--statsFile',
                             type=str,
-                            help=f'Redirect rsync logs to file pointed by this argument')
+                            help=f'Redirect rsync stats and progress to to file pointed by this argument')
     parser.add_argument('-h', '--help', action='help')
     return parser.parse_args()
 
@@ -1101,13 +1097,23 @@ if __name__ == "__main__":
     catch_exception_class = TargetException if args.verbose > 1 else Exception
     target = '-'
     
-    if not args.action == Action.PUSH_STATS.value:
+    if args.action == Action.PUSH_STATS.value:
+        try:
+            influxdb = InfluxServer(common_conf['influx']['host'], common_conf['influx']['port'], common_conf['influx']['user'], common_conf['influx']['password_file'], common_conf['influx']['database'], common_conf['influx'].get('verify_ssl'))
+            influxdb.push_run_stats(common_conf['files']['run_state'])
+            influxdb.push_cleanup_stats(common_conf['files']['cleanup_state'])
+        except (OSError, FileNotFoundError, ConnectionError) as e:
+            print(f"ERROR: Connection to influx server failed: {e}")
+            log.error(f"ERROR: Connection to influx server failed: {e}")
+            sys.exit(Nagios.WARNING)
+    else:
         if args.action == Action.CLEANUP.value:
             state = CleanupState(common_conf['files']['cleanup_state'])
             nagios_service = common_conf['nagios']['cleanup_service']
         else:
             state = RunState(common_conf['files']['run_state'])
             nagios_service = common_conf['nagios']['run_service']
+        
         nagios = NagiosServer(common_conf['nagios']['host'], common_conf['nagios']['port'], common_conf['nagios']['host_service'], nagios_service)
 
         if 'all' in args.targets:
@@ -1148,16 +1154,5 @@ if __name__ == "__main__":
         state.remove_undefined_targets(list(conf["targets"]))
 
         if not args.noReport:
-            nagios.send_report_to_nagios(getattr(Nagios, str(state.get_most_failure_status())), state.get_summary())
-    
-    if not args.noPushStats:
-        try:
-            influxdb = InfluxServer(common_conf['influx']['host'], common_conf['influx']['port'], common_conf['influx']['user'], common_conf['influx']['password_file'], common_conf['influx']['database'], common_conf['influx'].get('verify_ssl'))
-            if args.action == Action.RUN.value or args.action == Action.PUSH_STATS.value:
-                influxdb.push_run_stats(common_conf['files']['run_state'])
-            if args.action == Action.CLEANUP.value:
-                influxdb.push_cleanup_stats(common_conf['files']['cleanup_state'])
-        except (OSError, FileNotFoundError, ConnectionError, FileNotFoundError) as e:
-            print(f"ERROR: Connection to influx server failed: {e}")
-            log.error(f"ERROR: Connection to influx server failed: {e}")
-            sys.exit(Nagios.WARNING)
+            nagios.send_report_to_nagios(getattr(Nagios, str(state.get_most_failure_status())), state.get_summary())       
+    sys.exit(0)
