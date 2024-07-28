@@ -1102,7 +1102,7 @@ if __name__ == "__main__":
             influxdb = InfluxServer(common_conf['influx']['host'], common_conf['influx']['port'], common_conf['influx']['user'], common_conf['influx']['password_file'], common_conf['influx']['database'], common_conf['influx'].get('verify_ssl'))
             influxdb.push_run_stats(common_conf['files']['run_state'])
             influxdb.push_cleanup_stats(common_conf['files']['cleanup_state'])
-            print(f"SUCCESS: Backup status sent to {common_conf['influx']['host']}")
+            print(f"SUCCESS: Backup stats sent to {common_conf['influx']['host']}")
         except (OSError, FileNotFoundError, ConnectionError) as e:
             print(f"ERROR: Connection to influx server failed: {e}")
             log.error(f"ERROR: Connection to influx server failed: {e}")
