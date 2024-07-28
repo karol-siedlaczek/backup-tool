@@ -2,6 +2,7 @@ backup-tool.yaml
 backup-tool.log
 backup-state.yaml
 cleanup-state.yaml
+run-state.yaml
 rsyncpass
 influxpass
 .vscode
