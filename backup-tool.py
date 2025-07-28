@@ -694,7 +694,7 @@ class Target():
             log.info(f"Executing pre-hook: '{pre_hook}'...")
             try:
                 run_cmd(pre_hook)
-                log.info(f"Pre-hook '{pre_hook}' executed")
+                log.info(f"Pre-hook '{pre_hook}' executed successfully")
             except subprocess.CalledProcessError as e:
                 raise TargetException(f"Failed to execute pre-hook: '{pre_hook}', error: {e}")
         
