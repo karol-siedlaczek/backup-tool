@@ -92,6 +92,7 @@ default:
     - .cache
     - "*.sock"
 
+# All parameters under "default" markup will be appended to below target options (if it is not overwritten)
 targets:
   target-01:
     dest: target01/noice_backup
@@ -109,6 +110,8 @@ targets:
     type: pull
     sources:
       - /etc
+    exclude:
+      - /etc/rsyncd.secrets # Will overwrite default exclude
     max_size: 1GB
 
   target-03:
