@@ -15,11 +15,8 @@ from glob import glob
 from influxdb import InfluxDBClient
 from inspect import isclass
 from datetime import datetime, timedelta
-from wakeonlan import send_magic_packet
 import subprocess
 import logging
-
-CONFIG_FILE = '/etc/backup-tool/backup-tool.yaml'
 
 class Defaults(Enum):
     @staticmethod
@@ -45,20 +42,20 @@ class RequiredCommonParams(Defaults):
     DIRS = ['backups', 'work', 'scripts']
     
     @staticmethod
-    def validate(commons) -> None:
+    def validate(commons, config_file) -> None:
         try:
             if not commons:
                 raise EnvironmentError("section 'common' is not defined")
             for parent_param in list(RequiredCommonParams):
                 parent_attr = commons.get(str(parent_param))
                 if not parent_attr:
-                    raise EnvironmentError(f"parameter 'common.{parent_param}' is not defined")
+                    raise EnvironmentError(f"required parameter 'common.{parent_param}' is not defined")
                 for child_param in parent_param.value:
                     child_attr = parent_attr.get(str(child_param))
                     if not child_attr:
-                        raise EnvironmentError(f"parameter 'common.{parent_param}.{child_param}' is not defined")
+                        raise EnvironmentError(f"required parameter 'common.{parent_param}.{child_param}' is not defined")
         except EnvironmentError as e:
-            print(f"File '{CONFIG_FILE}' is not valid config: {e}")
+            print(f"File '{config_file}' is not valid config: {e}")
             sys.exit(Nagios.UNKNOWN)
 
 class BackupType(Defaults):
@@ -478,7 +475,7 @@ class Target():
         self.scripts_dir = scripts_dir
         self.max_size = None
         self.max_num = None
-        self.rsync_port = conf.get('rsync_port') or 873
+        self.pre_hooks = conf.get('pre_hooks') or default_conf.get('pre_hooks')
         max_size = conf.get('max_size') or default_conf.get('max_size')
         max_num = conf.get('max_num') or default_conf.get('max_num')
         self.elapsed_time_copy = None
@@ -487,10 +484,10 @@ class Target():
         self.transfer_speed_pack = None
 
         if max_size and max_num:
-            log.debug(f"Parameter 'max_size' and 'max_num' are mutually exclusive, max_num ({max_num}) will be overwritten by max_size ({max_size})")
+            log.warn(f"Parameter 'max_size' and 'max_num' are mutually exclusive, max_num ({max_num}) will be overwritten by max_size ({max_size})")
             self.max_size = max_size
         elif not max_size and not max_num:
-            raise TargetException("Target must have defined any parameter to declare limitations, by size choose parameter 'max_size' with value <digit><B|KB|MB|GB|TB>, by count select 'max_num' with value <digit>")
+            raise TargetException("Target must have defined at least one parameter which declares limitations. First option is by size - choose parameter 'max_size' with value <digit><B|KB|MB|GB|TB>, to limit by backups count select 'max_num' with value <digit>")
         elif max_size:
             self.max_size = max_size
         else:
@@ -692,6 +689,14 @@ class Target():
         except FileNotFoundError:
             return None
         
+    def run_pre_hooks(self):
+        for pre_hook in self.pre_hooks:
+            log.info(f"Running pre-hook: '{pre_hook}'")
+        try:
+            run_cmd(pre_hook)
+        except subprocess.CalledProcessError as e:
+            raise TargetException(f"Failed to execute pre-hook: '{pre_hook}', error: {e}")
+        
     def create_backup(self, path) -> Backup:
         backup = Backup(path)
         backup.set_permissions(self.permissions)
@@ -815,12 +820,9 @@ class PullTarget(Target):
         self.timeout = conf.get('timeout') or default_conf.get('timeout')
         self.password_file = conf.get('password_file') or default_conf.get('password_file')
         self.exclude = conf.get('exclude') or default_conf.get('exclude')
-        self.wake_on_lan = bool(conf.get('wake_on_lan'))
         self.stats_file = stats_file    
+        self.rsync_port = conf.get('rsync_port') or 873
         self.remote = bool(re.match(r'^rsync:\/\/[a-zA-Z_\-\.0-9]*@', self.sources[0]))
-        
-        if self.wake_on_lan:
-            self._mac_address = conf.get('wake_on_lan').get('mac_address')
     
     @property
     def sources(self) -> list:
@@ -837,10 +839,6 @@ class PullTarget(Target):
     @property
     def exclude(self) -> list:
         return self._exclude
-    
-    @property
-    def mac_address(self) -> str:
-        return self._mac_address
     
     @property
     def stats_file(self) -> str:
@@ -872,12 +870,6 @@ class PullTarget(Target):
         else:
             self._exclude = None
     
-    @mac_address.setter
-    def mac_address(self, value) -> None:
-        TargetException.validate_required_param('mac_address', value)  # Only required when wake_on_lan is True
-        TargetException.validate_match('mac_address', r'^([0-9A-Fa-f]{2}[:-]){5}([0-9A-Fa-f]{2})$', value, 'is not valid MAC address')
-        self._mac_address = value
-    
     @stats_file.setter
     def stats_file(self, value) -> None:
         if value:
@@ -887,6 +879,7 @@ class PullTarget(Target):
             self._stats_file = None
         
     def create_backup(self) -> Backup:
+        self.run_pre_hooks()
         new_backup_path = os.path.join(self.dest, Backup.get_today_package_name()) # -rlptgoD
         base_cmd = f'rsync -rlptoW --timeout 30 --no-specials --no-devices{f" --contimeout {self.timeout} --password-file {self.password_file} --port {self.rsync_port}" if self.remote else ""}'
         
@@ -955,6 +948,7 @@ class PushTarget(Target):
             self._frequency = int(number) * 30 * 24
     
     def create_backup(self) -> Backup:
+        self.run_pre_hooks()
         latest_backup = self.get_latest_backup()
         
         if latest_backup:
@@ -997,36 +991,46 @@ def parse_args():
     parser = argparse.ArgumentParser(description='Backup script', add_help=False)
     parser.add_argument('action', choices=[e.value for e in Action])
     action = parser.parse_known_args()[0].action
+    
+    parser.add_argument('-c', '--conf',
+        default='/etc/backup-tool/backup-tool.yaml',
+        type = argparse.FileType('r'),
+        help = "Config file, default is '/etc/backup-tool/backup-tool.yaml'"
+    )
     parser.add_argument('-v', '--verbose', 
-                        action='count', 
-                        default=1,
-                        help=f'Default verbose level is 1 (INFO)')
+        action='count', 
+        default=1,
+        help=f'Default verbose level is 1 (INFO)'
+    )
     if action != Action.PUSH_STATS.value:
         parser.add_argument('-t', '--targets',
-                            required=True,
-                            nargs='+',
-                            help=f'Target list defined in {CONFIG_FILE} configuration file under "targets" markup')
+            required=True,
+            nargs='+',
+            help='Target list defined in config file under "targets" markup'
+        )
         parser.add_argument('-m', '--mode',
-                            default='full',
-                            choices=['full', 'inc'],
-                            help=f'Not implemented yet, currently all backups are full')
+            default='full',
+            choices=['full', 'inc'],
+            help=f'Not implemented yet, currently all backups are full'
+        )
         parser.add_argument('--no-report',
-                            default=False,
-                            action='store_true',
-                            help=f'Disable sending state of this iteration to NSCA server defined in {CONFIG_FILE}')
+            default=False,
+            action='store_true',
+            help='Disable sending state of this iteration to NSCA server defined in config file'
+        )
     if action == Action.CLEANUP.value:
         parser.add_argument('--force',
-                            default=False,
-                            action='store_true',
-                            help=f'Clean backups to 0 backups, even if limits are to small, no matter what')
+            default=False,
+            action='store_true',
+            help=f'Normally (even if conditions allow it) cleanup iteration will not delete ' +
+                    'the last backup to avoid losing all backups and current run will return warning, ' +
+                    'but with this argument defined? No one will care about your last backups, if conditions allow even last backup will be deleted'
+        )
     elif action == Action.RUN.value:
         parser.add_argument('--stats-file',
-                            type=str,
-                            help=f'Redirect rsync stats and progress to file pointed by this argument')
-        parser.add_argument('--pre-hooks',
-                            type=str,
-                            nargs='+',
-                            help=f'Add pre scripts to run before every target run') # TODO - To implement
+            type=str,
+            help=f'Redirect rsync stats and progress to file pointed by this argument'
+        )
     parser.add_argument('-h', '--help', action='help')
     return parser.parse_args()
 
@@ -1091,14 +1095,14 @@ def run_cmd(cmd, check=True) -> str:
 if __name__ == "__main__":
     args = parse_args()
     
-    with open(CONFIG_FILE, "r") as f:
+    with open(args.conf, "r") as f:
         conf = yaml.safe_load(f)
     common_conf = conf.get('common')
-    RequiredCommonParams.validate(common_conf)
+    RequiredCommonParams.validate(common_conf, args.conf)
     log = get_logger(common_conf['files']['log'], args.verbose)
     catch_exception_class = TargetException if args.verbose > 1 else Exception
     target = '-'
-    
+
     if args.action == Action.PUSH_STATS.value:
         try:
             influxdb = InfluxServer(common_conf['influx']['host'], common_conf['influx']['port'], common_conf['influx']['user'], common_conf['influx']['password_file'], common_conf['influx']['database'], common_conf['influx'].get('verify_ssl'))
@@ -1126,7 +1130,7 @@ if __name__ == "__main__":
             try:                      
                 target_conf = conf['targets'].get(target)
                 if not target_conf: 
-                    raise TargetError(f"Target not defined in '{CONFIG_FILE}' conf file")
+                    raise TargetError(f"Target not defined in '{args.conf}' config file")
                 
                 if target_conf.get('type') == BackupType.PUSH.value:
                     target = PushTarget(target, target_conf, conf.get('default'), common_conf['dirs']['backups'], common_conf['dirs']['scripts'], common_conf['dirs']['work'])
