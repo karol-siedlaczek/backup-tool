@@ -109,7 +109,7 @@ targets:
   target-02: # Will be stored in <common.dirs.backups>/<target_name>
     type: pull
     sources:
-      - /etc
+      - rsync://rsync_user@backup-me.com/root/etc
     exclude:
       - /etc/rsyncd.secrets # Will overwrite default exclude
     max_size: 1GB
