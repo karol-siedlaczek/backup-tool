@@ -880,7 +880,7 @@ class PullTarget(Target):
     @stats_file.setter
     def stats_file(self, value) -> None:
         if value:
-            TargetValidator.validate_file_path(file_path=value, custom_msg=f"Path to stats file '{value}' defined with --statsFile is not valid file path")
+            TargetValidator.validate_file_path(file_path=value, custom_msg=f"Path to stats file '{value}' defined with --stats-file is not valid file path")
             self._stats_file = value
         else:
             self._stats_file = None
@@ -903,7 +903,7 @@ class PullTarget(Target):
         
         try:
             copy_start_time = datetime.now()
-            result = run_cmd(cmd)  # TODO - add reaction to 24 code (some file vanished) log.warning(f"Some files vanished in source during syncing: [{result.code}] {result.output}")
+            result = run_cmd(cmd)  # TODO - Add reaction to 24 code (some file vanished) log.warning(f"Some files vanished in source during syncing: [{result.code}] {result.output}")
             self.elapsed_time_copy = (datetime.now() - copy_start_time).seconds
         except subprocess.CalledProcessError as e:
             remove_file_or_dir(new_backup_path)
@@ -916,10 +916,7 @@ class PullTarget(Target):
         
         log.info(f"Backup saved in '{new_backup_path}' path")
         return super().create_backup(new_backup_path)
-    
-    def send_wol_packet(self) -> None:
-        send_magic_packet(self.mac_address)
-        log.debug(f'WOL packet sent to {self.mac_address}')
+
         
 class PushTarget(Target):    
     def __init__(self, name, conf, default_conf, base_dest, scripts_dir, work_dir) -> None:
@@ -1012,7 +1009,7 @@ def parse_args():
                             default='full',
                             choices=['full', 'inc'],
                             help=f'Not implemented yet, currently all backups are full')
-        parser.add_argument('--noReport',
+        parser.add_argument('--no-report',
                             default=False,
                             action='store_true',
                             help=f'Disable sending state of this iteration to NSCA server defined in {CONFIG_FILE}')
@@ -1022,9 +1019,13 @@ def parse_args():
                             action='store_true',
                             help=f'Clean backups to 0 backups, even if limits are to small, no matter what')
     elif action == Action.RUN.value:
-        parser.add_argument('--statsFile',
+        parser.add_argument('--stats-file',
                             type=str,
-                            help=f'Redirect rsync stats and progress to to file pointed by this argument')
+                            help=f'Redirect rsync stats and progress to file pointed by this argument')
+        parser.add_argument('--pre-hooks',
+                            type=str,
+                            nargs='+',
+                            help=f'Add pre scripts to run before every target run') # TODO - To implement
     parser.add_argument('-h', '--help', action='help')
     return parser.parse_args()
 
@@ -1121,7 +1122,7 @@ if __name__ == "__main__":
             args.targets = list(conf.get('targets'))
     
         for target in args.targets:
-            try:
+            try:                      
                 target_conf = conf['targets'].get(target)
                 if not target_conf: 
                     raise TargetError(f"Target not defined in '{CONFIG_FILE}' conf file")
@@ -1129,15 +1130,13 @@ if __name__ == "__main__":
                 if target_conf.get('type') == BackupType.PUSH.value:
                     target = PushTarget(target, target_conf, conf.get('default'), common_conf['dirs']['backups'], common_conf['dirs']['scripts'], common_conf['dirs']['work'])
                 elif target_conf.get('type') == BackupType.PULL.value:
-                    target = PullTarget(target, target_conf, conf.get('default'), common_conf['dirs']['backups'], common_conf['dirs']['scripts'], args.statsFile if hasattr(args, 'statsFile') else None)
+                    target = PullTarget(target, target_conf, conf.get('default'), common_conf['dirs']['backups'], common_conf['dirs']['scripts'], args.stats_file if hasattr(args, 'stats_file') else None)
                 else:
                     raise TargetException(f"Type '{target_conf.get('type')}' is not defined")
                 
                 log.info(f'[{args.action.upper()}] Start processing target')
 
                 if args.action == Action.RUN.value:
-                    if type(target) == PullTarget and target.wake_on_lan: 
-                        target.send_wol_packet()
                     target.create_backup()
                     state.set_target_status(target, f'({get_display_size(target.backup.size)}) {target.backup.package}', Nagios.OK, target.elapsed_time_copy, target.elapsed_time_pack, target.transfer_speed_copy, target.transfer_speed_pack)
                 elif args.action == Action.CLEANUP.value:                
@@ -1154,6 +1153,6 @@ if __name__ == "__main__":
             
         state.remove_undefined_targets(list(conf["targets"]))
 
-        if not args.noReport:
+        if not args.no_report:
             nagios.send_report_to_nagios(getattr(Nagios, str(state.get_most_failure_status())), state.get_summary())       
     sys.exit(0)
