@@ -994,7 +994,7 @@ def parse_args():
     
     parser.add_argument('-c', '--conf',
         default='/etc/backup-tool/backup-tool.yaml',
-        type = argparse.FileType('r'),
+        type = str,
         help = "Config file, default is '/etc/backup-tool/backup-tool.yaml'"
     )
     parser.add_argument('-v', '--verbose', 
