@@ -691,11 +691,12 @@ class Target():
         
     def run_pre_hooks(self):
         for pre_hook in self.pre_hooks:
-            log.info(f"Running pre-hook: '{pre_hook}'")
-        try:
-            run_cmd(pre_hook)
-        except subprocess.CalledProcessError as e:
-            raise TargetException(f"Failed to execute pre-hook: '{pre_hook}', error: {e}")
+            log.info(f"Executing pre-hook: '{pre_hook}'...")
+            try:
+                run_cmd(pre_hook)
+                log.info(f"Pre-hook '{pre_hook}' executed")
+            except subprocess.CalledProcessError as e:
+                raise TargetException(f"Failed to execute pre-hook: '{pre_hook}', error: {e}")
         
     def create_backup(self, path) -> Backup:
         backup = Backup(path)
