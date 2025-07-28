@@ -478,6 +478,7 @@ class Target():
         self.scripts_dir = scripts_dir
         self.max_size = None
         self.max_num = None
+        self.rsync_port = conf.get('rsync_port') or 873
         max_size = conf.get('max_size') or default_conf.get('max_size')
         max_num = conf.get('max_num') or default_conf.get('max_num')
         self.elapsed_time_copy = None
@@ -887,7 +888,7 @@ class PullTarget(Target):
         
     def create_backup(self) -> Backup:
         new_backup_path = os.path.join(self.dest, Backup.get_today_package_name()) # -rlptgoD
-        base_cmd = f'rsync -rlptoW --timeout 30 --no-specials --no-devices{f" --contimeout {self.timeout} --password-file {self.password_file}" if self.remote else ""}'
+        base_cmd = f'rsync -rlptoW --timeout 30 --no-specials --no-devices{f" --contimeout {self.timeout} --password-file {self.password_file} --port {self.rsync_port}" if self.remote else ""}'
         
         if self.stats_file:
             base_cmd += " --stats --info=name1,progress2"
