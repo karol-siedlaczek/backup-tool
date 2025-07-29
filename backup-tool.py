@@ -439,7 +439,7 @@ class TargetValidator():
         if not isclass(class_type):
             raise AttributeError(f"Type '{class_type}' is not class")
         elif not isinstance(value, class_type):
-            raise TargetError(f"Parameter '{param}' with '{value}' value {str(custom_msg) if custom_msg else f'is not valid {class_type} type'}")
+            raise TargetError(f"Parameter '{param}' with '{value}' value {str(custom_msg) if custom_msg else f'is not valid {class_type.__name__} type'}")
         
     @staticmethod
     def validate_absolute_dir_path(param, dir_path):
@@ -599,6 +599,7 @@ class Target():
     def pre_hooks(self, value) -> list:
         if value:
             TargetValidator.validate_type('pre_hooks', list, value)
+            self._pre_hooks = value
         else:
             self._pre_hooks = []
     
