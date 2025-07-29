@@ -556,19 +556,19 @@ class Target():
         return self._transfer_speed_pack
     
     @type.setter
-    def type(self, value) -> str:
+    def type(self, value) -> None:
         TargetValidator.validate_required_param('type', value)
         TargetValidator.validate_allowed_values('type', value, Defaults.list(BackupType))
         self._type = value
         
     @dest.setter
-    def dest(self, value) -> str:
+    def dest(self, value) -> None:
         TargetValidator.validate_required_param('dest', value)
         TargetValidator.validate_absolute_dir_path('dest', value)
         self._dest = value
     
     @max_size.setter
-    def max_size(self, value) -> int:
+    def max_size(self, value) -> None:
         if value:
             match = TargetValidator.validate_match('max_size', r'^([1-9]{1}[\d]*)\s?(B|KB|MB|GB|TB)$', value)
             size, unit = match.groups()
@@ -587,7 +587,7 @@ class Target():
             self._max_size = None
     
     @max_num.setter
-    def max_num(self, value) -> int:
+    def max_num(self, value) -> None:
         if value:
             TargetValidator.validate_type('max_num', int, value)
             TargetValidator.validate_min_value('max_num', 2, value)
@@ -596,7 +596,7 @@ class Target():
             self._max_num = None
     
     @pre_hooks.setter
-    def pre_hooks(self, value) -> list:
+    def pre_hooks(self, value) -> None:
         if value:
             TargetValidator.validate_type('pre_hooks', list, value)
             self._pre_hooks = value
@@ -604,25 +604,25 @@ class Target():
             self._pre_hooks = []
     
     @format.setter
-    def format(self, value) -> str:
+    def format(self, value) -> None:
         TargetValidator.validate_required_param('format', value)
         TargetValidator.validate_allowed_values('format', value, Defaults.list(Format))
         self._format = value
     
     @owner.setter
-    def owner(self, value) -> str:
+    def owner(self, value) -> None:
         TargetValidator.validate_required_param('owner', value)
         TargetValidator.validate_type('owner', str, value)
         self._owner = value
     
     @permissions.setter
-    def permissions(self, value) -> str:
+    def permissions(self, value) -> None:
         TargetValidator.validate_required_param('permissions', value)
         TargetValidator.validate_match('permissions', r'^[0-7]{3}$', value)
         self._permissions = value
     
     @encryption_key.setter
-    def encryption_key(self, value) -> str:
+    def encryption_key(self, value) -> None:
         if self.format == Format.ENCRYPTED_PACKAGE.value:
             TargetValidator.validate_required_param('encryption_key', value)
             TargetValidator.validate_type('encryption_key', str, value)
@@ -631,28 +631,28 @@ class Target():
             self._encryption_key = None
 
     @elapsed_time_copy.setter
-    def elapsed_time_copy(self, value) -> str:
+    def elapsed_time_copy(self, value) -> None:
         if value is not None and value == 0:
             self._elapsed_time_copy = 1
         else:
             self._elapsed_time_copy = value
     
     @elapsed_time_pack.setter
-    def elapsed_time_pack(self, value) -> str:
+    def elapsed_time_pack(self, value) -> None:
         if value is not None and value == 0:
             self._elapsed_time_pack = 1
         else:
             self._elapsed_time_pack = value
         
     @transfer_speed_copy.setter
-    def transfer_speed_copy(self, value) -> str:
+    def transfer_speed_copy(self, value) -> None:
         if value is not None and value == 0:
             self._transfer_speed_copy = 1
         else:
             self._transfer_speed_copy = value
         
     @transfer_speed_pack.setter
-    def transfer_speed_pack(self, value) -> str:
+    def transfer_speed_pack(self, value) -> None:
         if value is not None and value == 0:
             self._transfer_speed_pack = 1
         else:
