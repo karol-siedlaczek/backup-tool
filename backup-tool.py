@@ -264,7 +264,8 @@ class State():
         summary = ''
         
         for target, target_state in self.state.items():
-            summary += f"{target_state.get('status')}: [{target}] {target_state.get('msg')} ({target_state.get('timestamp')})</br>"
+            msg = "Backup failed, check logs and state file" if (int(target_state['code']) > 0)  else target_state.get('msg')
+            summary += f"{target_state.get('status')}: [{target}] {msg} ({target_state.get('timestamp')})</br>"
         return summary[:-5]
 
 class RunState(State):
@@ -519,6 +520,10 @@ class Target():
         return self._max_num
     
     @property
+    def pre_hooks(self) -> list:
+        return self._pre_hooks
+    
+    @property
     def format(self) -> str:
         return self._format
     
@@ -589,6 +594,13 @@ class Target():
             self._max_num = value
         else:
             self._max_num = None
+    
+    @pre_hooks.setter
+    def pre_hooks(self, value) -> list:
+        if value:
+            TargetValidator.validate_type('pre_hooks', list, value)
+        else:
+            self._pre_hooks = []
     
     @format.setter
     def format(self, value) -> str:
