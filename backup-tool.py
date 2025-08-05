@@ -443,7 +443,7 @@ class TargetValidator():
         
     @staticmethod
     def validate_absolute_dir_path(param, dir_path):
-        regex = r'^((/[a-zA-Z0-9-_]+)+|/)$'
+        regex = r'^((/[a-zA-Z0-9-_]+)+/?)$'
         match = re.fullmatch(regex, dir_path)
         if not match:
             raise TargetError(f"Parameter '{param}' with '{dir_path}' path is not valid absolute path to directory")
