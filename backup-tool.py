@@ -7,7 +7,6 @@ import pwd
 import grp
 import yaml
 import math
-import shlex
 import argparse
 from requests import packages
 from enum import Enum
