@@ -836,7 +836,7 @@ class PullTarget(Target):
         self.exclude = conf.get('exclude') or default_conf.get('exclude')
         self.stats_file = stats_file    
         self.rsync_port = conf.get('rsync_port') or 873
-        self.remote = bool(re.match(r'^rsync:\/\/[a-zA-Z_\-\.0-9]*@', self.sources[0]))
+        self.remote = bool(re.match(r'^\'?rsync:\/\/[a-zA-Z_\-\.0-9]*@', self.sources[0]))
     
     @property
     def sources(self) -> list:
@@ -903,7 +903,7 @@ class PullTarget(Target):
             exclude_args = ' '.join(f'--exclude "{exclude_arg}"' for exclude_arg in self.exclude)
             base_cmd = f'{base_cmd} {exclude_args}'
         
-        cmd = f'{base_cmd} {self.sources.join(' ')} {new_backup_path}' 
+        cmd = f'{base_cmd} {" ".join(self.sources)} {new_backup_path}'
         os.makedirs(new_backup_path, exist_ok=True)
         log.info(f"Pulling target files to '{new_backup_path}' path...")
         log.debug(f"rsync cmd: {cmd}")
@@ -1102,7 +1102,17 @@ def get_logger(log_file, verbose_level) -> None:
     return logging.getLogger('backup-tool')
 
 def run_cmd(cmd, check=True) -> str:
-    process = subprocess.run(shlex.split(cmd), stdin=subprocess.DEVNULL, stderr=subprocess.PIPE, stdout=subprocess.PIPE, check=check, text=True)
+    process = subprocess.run(
+        cmd, 
+        shell=True, 
+        stdin=subprocess.DEVNULL, 
+        stderr=subprocess.PIPE, 
+        stdout=subprocess.PIPE, 
+        check=check, 
+        text=True, 
+        executable="/bin/bash"
+    )
+    # process = subprocess.run(shlex.split(cmd), stdin=subprocess.DEVNULL, stderr=subprocess.PIPE, stdout=subprocess.PIPE, check=check, text=True)
     return process.stdout or process.stderr
 
 if __name__ == "__main__":
