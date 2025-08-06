@@ -89,26 +89,26 @@ class Nagios(str, Enum):
 
 
 class TargetException(Exception):
-    __slots__ = ['code']
+    __slots__ = ['code', 'msg']
     
-    def __init__(self, code) -> None:
+    def __init__(self, code, msg) -> None:
         self.code = code
 
 class TargetError(TargetException):
     def __init__(self, msg) -> None:
-        super().__init__(Nagios.CRITICAL)
+        super().__init__(Nagios.CRITICAL, msg)
 
 class TargetWarning(TargetException):
     def __init__(self, msg) -> None:
-        super().__init__(Nagios.WARNING)
+        super().__init__(Nagios.WARNING, msg)
 
 class TargetSkipException(TargetException):
     def __init__(self, msg) -> None:
-        super().__init__(Nagios.OK)
+        super().__init__(Nagios.OK, msg)
 
 class TargetCleanupError(TargetException):
     def __init__(self, msg) -> None:
-        super().__init__(Nagios.CRITICAL)
+        super().__init__(Nagios.CRITICAL, msg)
 
 class InfluxServer():
     __slots__ = ['host', 'port', 'client']
@@ -488,7 +488,7 @@ class Target():
             log.warn(f"Parameter 'max_size' and 'max_num' are mutually exclusive, max_num ({max_num}) will be overwritten by max_size ({max_size})")
             self.max_size = max_size
         elif not max_size and not max_num:
-            raise TargetException("Target must have defined at least one parameter which declares limitations. First option is by size - choose parameter 'max_size' with value <digit><B|KB|MB|GB|TB>, to limit by backups count select 'max_num' with value <digit>")
+            raise TargetError("Target must have defined at least one parameter which declares limitations. First option is by size - choose parameter 'max_size' with value <digit><B|KB|MB|GB|TB>, to limit by backups count select 'max_num' with value <digit>")
         elif max_size:
             self.max_size = max_size
         else:
@@ -709,7 +709,7 @@ class Target():
                 run_cmd(pre_hook)
                 log.info(f"Pre-hook '{pre_hook}' executed successfully")
             except subprocess.CalledProcessError as e:
-                raise TargetException(f"Failed to execute pre-hook: '{pre_hook}', error: {e}")
+                raise TargetError(f"Failed to execute pre-hook: '{pre_hook}', error: {e}")
         
     def create_backup(self, path) -> Backup:
         backup = Backup(path)
@@ -1160,7 +1160,7 @@ if __name__ == "__main__":
                 elif target_conf.get('type') == BackupType.PULL.value:
                     target = PullTarget(target, target_conf, conf.get('default'), common_conf['dirs']['backups'], common_conf['dirs']['scripts'], args.stats_file if hasattr(args, 'stats_file') else None)
                 else:
-                    raise TargetException(f"Type '{target_conf.get('type')}' is not defined")
+                    raise TargetError(f"Type '{target_conf.get('type')}' is not valid option. Valid options are: [{BackupType.PUSH.value}, {BackupType.PULL.value}]")
                 
                 log.info(f'[{args.action.upper()}] Start processing target')
 
@@ -1174,7 +1174,7 @@ if __name__ == "__main__":
                         msg, total_recovered_space, total_removed_backups, total_size = target.cleanup()
                         state.set_target_status(target, msg, Nagios.OK, total_recovered_space, total_removed_backups, total_size, target.max_size, target.max_num)
                 else:
-                    raise TargetException(f"Action '{args.action}' is not defined")
+                    raise TargetError(f"Action '{args.action}' is not valid option. Valid options are: [{Action.RUN.value}, {Action.CLEANUP.value}]")
             except catch_exception_class as e:
                 code = e.code if hasattr(e, 'code') else Nagios.CRITICAL
                 state.set_target_status(target, str(e), code)
