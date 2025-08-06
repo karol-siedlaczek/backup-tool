@@ -1183,4 +1183,4 @@ if __name__ == "__main__":
 
         if not args.no_report:
             nagios.send_report_to_nagios(getattr(Nagios, str(state.get_most_failure_status())), state.get_summary())       
-    sys.exit(Nagios.OK)
+    sys.exit(0)
