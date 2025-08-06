@@ -263,7 +263,7 @@ class State():
         summary = ''
         
         for target, target_state in self.state.items():
-            msg = "Backup failed, check logs and state file" if (int(target_state['code']) > 0)  else target_state.get('msg')
+            msg = "Found errors, check logs and state file" if (int(target_state['code']) > 0)  else target_state.get('msg')
             summary += f"{target_state.get('status')}: [{target}] {msg} ({target_state.get('timestamp')})</br>"
         return summary[:-5]
 
@@ -482,6 +482,7 @@ class Target():
         self.elapsed_time_pack = None
         self.transfer_speed_copy = None
         self.transfer_speed_pack = None
+        self.cleanup_ratio = 1.2
 
         if max_size and max_num:
             log.warn(f"Parameter 'max_size' and 'max_num' are mutually exclusive, max_num ({max_num}) will be overwritten by max_size ({max_size})")
@@ -794,11 +795,11 @@ class Target():
                 log.info(f"Start cleanup, current total size over limit ({get_display_size(total_size)} / {self.display_max_size})")
  
                 while True: # Directory needs to have at least 120% free space of latest backup size
-                    if total_size + latest_backup.size * 1.2 <= self.max_size:
+                    if total_size + latest_backup.size * self.cleanup_ratio <= self.max_size:
                         msg = f'Cleanup finished, removed {total_removed_backups} backup/s, recovered {get_display_size(total_recovered_space)} ({get_display_size(total_size)} / {self.display_max_size})'
                         break
                     elif target.get_backups_num() == 1 and not args.force:
-                        raise TargetCleanupError(f"Cleanup aborted, only 1 backup left but current max_size limit ({self.display_max_size}) is not enough for next backup*1.5 (~{get_display_size(latest_backup.size*1.5)}), consider increasing the limit or use -f/--force are to process cleanup")
+                        raise TargetCleanupError(f"Cleanup aborted, only 1 backup left but current max_size limit ({self.display_max_size}) is not enough for next backup * {self.cleanup_ratio} (~{get_display_size(latest_backup.size * self.cleanup_ratio)}), consider increasing the limit or use -f/--force to process cleanup")
                     oldest_backup_size = remove_oldest_backup()
                     total_removed_backups += 1
                     total_recovered_space += oldest_backup_size
@@ -813,7 +814,7 @@ class Target():
                 
                 while total_num >= self.max_num:
                     if total_num == 1 and not args.force:
-                        raise TargetCleanupError(f"Cleanup aborted, only 1 backup left and current max_num limit allows only for {self.max_num} backup, directory cannot be empty, consider increasing the limit or use -f/--force are to process cleanup")
+                        raise TargetCleanupError(f"Cleanup aborted, only 1 backup left and current max_num limit allows only for {self.max_num} backup, directory cannot be empty, consider increasing the limit or use -f/--force to process cleanup")
                     oldest_backup_size = remove_oldest_backup()
                     total_removed_backups += 1
                     total_num -= 1
@@ -1168,7 +1169,7 @@ if __name__ == "__main__":
                     state.set_target_status(target, f'({get_display_size(target.backup.size)}) {target.backup.package}', Nagios.OK, target.elapsed_time_copy, target.elapsed_time_pack, target.transfer_speed_copy, target.transfer_speed_pack)
                 elif args.action == Action.CLEANUP.value:                
                     if target.get_backups_num() == 0: 
-                        state.set_target_status(target, 'No found any backup', Nagios.WARNING, 0, 0, 0, target.max_size, target.max_num)
+                        state.set_target_status(target, 'Not found any backup', Nagios.WARNING, 0, 0, 0, target.max_size, target.max_num)
                     else:
                         msg, total_recovered_space, total_removed_backups, total_size = target.cleanup()
                         state.set_target_status(target, msg, Nagios.OK, total_recovered_space, total_removed_backups, total_size, target.max_size, target.max_num)
@@ -1182,4 +1183,4 @@ if __name__ == "__main__":
 
         if not args.no_report:
             nagios.send_report_to_nagios(getattr(Nagios, str(state.get_most_failure_status())), state.get_summary())       
-    sys.exit(0)
+    sys.exit(Nagios.OK)
