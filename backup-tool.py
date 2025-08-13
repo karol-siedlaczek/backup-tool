@@ -979,7 +979,7 @@ class PushTarget(Target):
                     copy_start_time = datetime.now()
                     run_cmd(f'mv {self.work_dir}/ {new_backup_path}')
                     self.elapsed_time_copy = (datetime.now() - copy_start_time).seconds
-                    remove_file_or_dir(f'{self.work_dir}/')
+                    remove_file_or_dir(f'{self.work_dir}/*')
                 except subprocess.CalledProcessError as e:
                     remove_file_or_dir(new_backup_path)
                     raise TargetError(f"Moving files from '{self.work_dir}' working directory to '{new_backup_path}' failed: {e}: {e.stderr}")
