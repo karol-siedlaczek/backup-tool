@@ -183,10 +183,11 @@ class InfluxServer():
     
     
 class NagiosServer():
-    __slots__ = ['bin', 'host', 'port', 'host_service', 'service']
+    __slots__ = ['nsca_bin', 'echo_bin', 'host', 'port', 'host_service', 'service']
     
     def __init__(self, host, port, host_service, service) -> None:
-        self.bin = '/usr/sbin/send_nsca'
+        self.nsca_bin = '/usr/sbin/send_nsca'
+        self.echo_bin = '/bin/echo'
         self.host = host
         self.port = port
         self.host_service = host_service
@@ -194,13 +195,13 @@ class NagiosServer():
     
     def send_report_to_nagios(self, code, msg) -> None:
         msg = f'{self.host_service}\t{self.service}\t{code}\t{msg}'
-        echo_process = subprocess.Popen(f'echo -e {msg}'.split(' '), stdout=subprocess.PIPE)
-        nsca_process = subprocess.Popen(['send_nsca', '-H', str(self.host), '-p', str(self.port)], stdin=echo_process.stdout, stderr=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
-        stdout, stderr = nsca_process.communicate()
-        if stderr:
-            raise ConnectionError(f"Sending nsca packet to {self.host}:{self.port} failed: {stderr}")
-        else:
-            log.debug(f"Nsca packet '{msg}' sent to {self.host}:{self.port}, output: {stdout}") 
+        cmd = f"{self.echo_bin} -e '{msg}' | {self.nsca_bin} -H {self.host} -p {self.port}"
+        
+        try:
+            result = run_cmd(cmd)
+            log.debug(f"Nsca packet '{msg}' sent to {self.host}:{self.port}, output: {result}") 
+        except subprocess.CalledProcessError as e:
+            raise ConnectionError(f"Sending nsca packet to {self.host}:{self.port} failed {e}: {e.stderr}")
     
     def __str__(self) -> str:
         return self.name
@@ -263,9 +264,14 @@ class State():
         summary = ''
         
         for target, target_state in self.state.items():
-            msg = "Found errors, check logs and state file" if (int(target_state['code']) > 0)  else target_state.get('msg')
-            summary += f"{target_state.get('status')}: [{target}] {msg} ({target_state.get('timestamp')})</br>"
-        return summary[:-5]
+            if int(target_state['code']) > 0:
+                msg = target_state.get('msg').strip().replace("\r\n", " ").replace("\n", " ")
+                summary += f"{target_state.get('status')}: [{target}] {msg} ({target_state.get('timestamp')})</br>"
+        
+        if summary == '':
+            return "OK: All backups successful" 
+        else:
+            return summary[:-5]
 
 class RunState(State):
     def __init__(self, state_file) -> None:
