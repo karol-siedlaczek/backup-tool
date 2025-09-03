@@ -14,6 +14,7 @@ from glob import glob
 from influxdb import InfluxDBClient
 from inspect import isclass
 from datetime import datetime, timedelta
+from yaml.scanner import ScannerError
 import subprocess
 import logging
 
@@ -71,6 +72,7 @@ class Action(Defaults):
     CLEANUP = 'cleanup'
     RUN = 'run'
     PUSH_STATS = 'push-stats'
+    VALIDATE = 'validate'
 
 class Nagios(str, Enum):
     OK = 0
@@ -1021,7 +1023,7 @@ def parse_args():
         default=1,
         help=f'Default verbose level is 1 (INFO)'
     )
-    if action != Action.PUSH_STATS.value:
+    if action in [Action.CLEANUP.value, Action.RUN.value]:
         parser.add_argument('-t', '--targets',
             required=True,
             nargs='+',
@@ -1124,8 +1126,17 @@ def run_cmd(cmd, check=True) -> str:
 if __name__ == "__main__":
     args = parse_args()
     
-    with open(args.conf, "r") as f:
-        conf = yaml.safe_load(f)
+    try:
+        with open(args.conf, "r") as f:
+            conf = yaml.safe_load(f)
+    except ScannerError as e:
+        print(f"Config file '{args.conf}' is not valid YAML file, error:\n{e}")
+        sys.exit(int(Nagios.CRITICAL))
+        
+    if args.action == Action.VALIDATE.value:
+        print(f"Config file '{args.conf}' is valid")
+        sys.exit(int(Nagios.OK))
+    
     common_conf = conf.get('common')
     RequiredCommonParams.validate(common_conf, args.conf)
     log = get_logger(common_conf['files']['log'], args.verbose)
@@ -1189,4 +1200,4 @@ if __name__ == "__main__":
 
         if not args.no_report:
             nagios.send_report_to_nagios(getattr(Nagios, str(state.get_most_failure_status())), state.get_summary())       
-    sys.exit(0)
+    sys.exit(int(Nagios.OK))
