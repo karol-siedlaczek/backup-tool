@@ -73,6 +73,7 @@ class Action(Defaults):
     RUN = 'run'
     PUSH_STATS = 'push-stats'
     VALIDATE = 'validate'
+    CONF_CHECK = 'conf-check'
 
 class Nagios(str, Enum):
     OK = 0
@@ -207,116 +208,6 @@ class NagiosServer():
     
     def __str__(self) -> str:
         return self.name
-           
-           
-class State():
-    MAX_MSG = 300
-    __slots__ = ['state_file', 'state']
-    
-    def __init__(self, state_file) -> None:
-        self.state_file = state_file
-        try:
-            with open(self.state_file, 'r') as f: 
-                self.state = yaml.safe_load(f)
-        except FileNotFoundError:
-            self.state = self.__init_state_file()
-        finally:
-            if not isinstance(self.state, dict):
-                self.state = self.__init_state_file()
-    
-    def __init_state_file(self) -> dict:
-        open(self.state_file, 'w').close()
-        os.chmod(self.state_file, 0o640)
-        return {}
-        
-    def set_target_status(self, target_name, new_state, msg) -> None:
-        with open(self.state_file, 'w') as f:
-            yaml.safe_dump(new_state, f)
-        
-        self.state = new_state
-        curr_status = self.state[str(target_name)]['status']
-        print(f'[{target_name}] {curr_status}: {msg}')
-        
-        if curr_status == Nagios.CRITICAL.name:
-            log.error(msg)
-        elif curr_status == Nagios.WARNING.name:
-            log.warning(msg)
-        else:
-            log.info(msg)
-        
-    def remove_undefined_targets(self, defined_targets) -> None:
-        targets_in_state_file = list(self.state.keys())
-        
-        for state_target in targets_in_state_file:
-            if state_target not in defined_targets:
-                del self.state[state_target]
-        with open(self.state_file, 'w') as f:
-            yaml.safe_dump(self.state, f)
-        
-    def get_most_failure_status(self) -> str:
-        most_failure_status = 'OK'
-        
-        for target_state in self.state.values():
-            status = target_state.get('status')
-            if int(getattr(Nagios, status)) > int(getattr(Nagios, most_failure_status)):
-                most_failure_status = status
-        return most_failure_status
-    
-    def get_summary(self) -> str:
-        summary = ''
-        
-        for target, target_state in self.state.items():
-            if int(target_state['code']) > 0:
-                msg = target_state.get('msg').strip().replace("\r\n", " ").replace("\n", " ")
-                summary += f"{target_state.get('status')}: [{target}] {msg} ({target_state.get('timestamp')})</br>"
-        
-        if summary == '':
-            return "OK: All backups successful" 
-        else:
-            return summary[:-5]
-
-class RunState(State):
-    def __init__(self, state_file) -> None:
-        super().__init__(state_file)
-    
-    def set_target_status(self, target_name, msg, code, elapsed_time_copy=None, elapsed_time_pack=None, transfer_speed_copy=None, transfer_speed_pack=None) -> None:
-        new_state = self.state
-        new_state[str(target_name)] = {
-            'timestamp': datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-            'code': int(code),
-            'status': Nagios.get_status_by_code(code),
-            'times': {
-                'copy': {
-                    'duration': elapsed_time_copy,
-                    'transfer_speed': transfer_speed_copy
-                },
-                'pack': {
-                    'duration': elapsed_time_pack,
-                    'transfer_speed': transfer_speed_pack
-                }
-            },
-            'msg': f'{msg[:State.MAX_MSG]}... ({len(msg) - State.MAX_MSG} log lines truncated)' if len(msg) > State.MAX_MSG else msg
-        }
-        super().set_target_status(target_name, new_state, msg)
-
-class CleanupState(State):
-    def __init__(self, state_file) -> None:
-        super().__init__(state_file)
-    
-    def set_target_status(self, target_name, msg, code, recovered_space=None, removed_backups=None, total_size=None, max_size=None, max_num=None) -> None:
-        new_state = self.state
-        new_state[str(target_name)] = {
-            'timestamp': datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-            'code': int(code),
-            'status': Nagios.get_status_by_code(code),
-            'recovered_space': recovered_space,
-            'removed_backups': removed_backups,
-            'total_size': total_size,
-            'max_size': max_size,
-            'max_num': max_num,
-            'msg': f'{msg[:State.MAX_MSG]}... ({len(msg) - State.MAX_MSG} log lines truncated)' if len(msg) > State.MAX_MSG else msg
-        }
-        super().set_target_status(target_name, new_state, msg)
 
 
 class Backup():
@@ -421,7 +312,13 @@ class Backup():
         
     def __str__(self) -> str:
         return self.path
+
+class InvalidBackup():
+    __slots__ = ['backup', 'reason']
     
+    def __init__(self, backup, reason) -> None:
+        self.backup = backup
+        self.reason = reason
 
 class TargetValidator():
     @staticmethod
@@ -491,9 +388,10 @@ class Target():
         self.transfer_speed_copy = None
         self.transfer_speed_pack = None
         self.cleanup_ratio = 1.2
+        self.min_valid_size_diff_ratio = 0.6
 
         if max_size and max_num:
-            log.warn(f"Parameter 'max_size' and 'max_num' are mutually exclusive, max_num ({max_num}) will be overwritten by max_size ({max_size})")
+            log.warning(f"Parameter 'max_size' and 'max_num' are mutually exclusive, max_num ({max_num}) will be overwritten by max_size ({max_size})")
             self.max_size = max_size
         elif not max_size and not max_num:
             raise TargetError("Target must have defined at least one parameter which declares limitations. First option is by size - choose parameter 'max_size' with value <digit><B|KB|MB|GB|TB>, to limit by backups count select 'max_num' with value <digit>")
@@ -709,6 +607,18 @@ class Target():
             return latest_backup
         except FileNotFoundError:
             return None
+    
+    def get_backups(self) -> list[Backup]:
+        backups = []
+        try:
+            for backup_package in os.listdir(self.dest):
+                try:
+                    backups.append(Backup(os.path.join(self.dest, backup_package)))
+                except NameError:
+                    continue
+            return backups
+        except FileNotFoundError:
+            return []
         
     def run_pre_hooks(self):
         for pre_hook in self.pre_hooks:
@@ -719,7 +629,7 @@ class Target():
             except subprocess.CalledProcessError as e:
                 raise TargetError(f"Failed to execute pre-hook: '{pre_hook}', error: {e}")
         
-    def create_backup(self, path) -> Backup:
+    def create_backup(self, path) -> Backup:            
         backup = Backup(path)
         backup.set_permissions(self.permissions)
          
@@ -781,6 +691,7 @@ class Target():
         
         if self.elapsed_time_pack:  # bytes per sec
             self.transfer_speed_pack = self.backup.size / self.elapsed_time_pack
+
         return backup
     
     def cleanup(self) -> None:
@@ -831,7 +742,34 @@ class Target():
             else:
                 msg = f'No cleanup needed ({total_num} / {self.max_num})'
         return msg, total_recovered_space, total_removed_backups, total_size
-    
+
+    def validate(self) -> list[InvalidBackup]:
+        total_num = self.get_backups_num()
+        log.info("Start validating target backups...")
+        
+        if total_num == 0:
+            log.info("Validation finished, no backups found")
+            return [], 0
+        
+        suspicious_backups = []
+        total_size = self.get_backups_size()
+        avg_size = total_size / total_num if total_num else 0
+        avg_size_display = get_display_size(avg_size)
+        
+        for backup in self.get_backups():
+            backup_size = backup.size
+            size_diff_ratio = backup_size / avg_size
+            
+            if size_diff_ratio > self.min_valid_size_diff_ratio:
+                reason = f"Backup '{backup.path}' ({get_display_size(backup_size)}) size is less than minimum valid ratio ({self.min_valid_size_diff_ratio}) compared to the average backup size '{avg_size_display}' for this target"
+                suspicious_backups.append(InvalidBackup(backup, reason))
+        
+        if len(suspicious_backups) > 0:
+            log.warn(f"Validation finished, found {len(suspicious_backups)} backups which did not passed validation checks")
+        else:
+            log.info(f"Validation finished, all backups ({total_num}) are valid")
+        return suspicious_backups, avg_size
+        
     def __str__(self) -> str:
         return self.name
         
@@ -1000,13 +938,142 @@ class PushTarget(Target):
                     raise TargetError(f"Moving files from '{self.work_dir}' working directory to '{new_backup_path}' failed: {e}: {e.stderr}")
 
                 log.info(f"Files moved from '{self.work_dir}' working directory to '{new_backup_path}' path")
-                return super().create_backup(new_backup_path)
+                return super().create_backup(new_backup_path, latest_backup)
             else:
                 raise TargetError(f"Not found any file to process in '{self.work_dir}' work directory")
         elif files_in_workdir:
             raise TargetWarning(f"Backup should not be created but found some files in '{self.work_dir}' working directory")
         else:
             raise TargetSkipException(f"Found latest backup from '{latest_backup.date}' created {format_hours_to_ago(last_backup_hours_ago)} ago, frequency is {format_hours_to_ago(self.frequency)}, backup creation skipped")
+
+
+class State():
+    MAX_MSG = 300
+    __slots__ = ['state_file', 'state']
+    
+    def __init__(self, state_file) -> None:
+        self.state_file = state_file
+        try:
+            with open(self.state_file, 'r') as f: 
+                self.state = yaml.safe_load(f)
+        except FileNotFoundError:
+            self.state = self.__init_state_file()
+        finally:
+            if not isinstance(self.state, dict):
+                self.state = self.__init_state_file()
+    
+    def __init_state_file(self) -> dict:
+        open(self.state_file, 'w').close()
+        os.chmod(self.state_file, 0o640)
+        return {}
+        
+    def set_target_status(self, target_name, new_state, msg) -> None:
+        with open(self.state_file, 'w') as f:
+            yaml.safe_dump(new_state, f)
+        
+        self.state = new_state
+        curr_status = self.state[str(target_name)]['status']
+        print(f'[{target_name}] {curr_status}: {msg}')
+        
+        if curr_status == Nagios.CRITICAL.name:
+            log.error(msg)
+        elif curr_status == Nagios.WARNING.name:
+            log.warning(msg)
+        else:
+            log.info(msg)
+        
+    def remove_undefined_targets(self, defined_targets) -> None:
+        targets_in_state_file = list(self.state.keys())
+        
+        for state_target in targets_in_state_file:
+            if state_target not in defined_targets:
+                del self.state[state_target]
+        with open(self.state_file, 'w') as f:
+            yaml.safe_dump(self.state, f)
+        
+    def get_most_failure_status(self) -> str:
+        most_failure_status = 'OK'
+        
+        for target_state in self.state.values():
+            status = target_state.get('status')
+            if int(getattr(Nagios, status)) > int(getattr(Nagios, most_failure_status)):
+                most_failure_status = status
+        return most_failure_status
+    
+    def get_summary(self) -> str:
+        summary = ''
+        
+        for target, target_state in self.state.items():
+            if int(target_state['code']) > 0:
+                msg = target_state.get('msg').strip().replace("\r\n", " ").replace("\n", " ")
+                summary += f"{target_state.get('status')}: [{target}] {msg} ({target_state.get('timestamp')})</br>"
+        
+        if summary == '':
+            return "OK: All backups successful" 
+        else:
+            return summary[:-5]
+
+class RunState(State):
+    def __init__(self, state_file) -> None:
+        super().__init__(state_file)
+    
+    def set_target_status(self, target_name, msg, code, elapsed_time_copy=None, elapsed_time_pack=None, transfer_speed_copy=None, transfer_speed_pack=None) -> None:
+        new_state = self.state
+        new_state[str(target_name)] = {
+            'timestamp': datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            'code': int(code),
+            'status': Nagios.get_status_by_code(code),
+            'times': {
+                'copy': {
+                    'duration': elapsed_time_copy,
+                    'transfer_speed': transfer_speed_copy
+                },
+                'pack': {
+                    'duration': elapsed_time_pack,
+                    'transfer_speed': transfer_speed_pack
+                }
+            },
+            'msg': f'{msg[:State.MAX_MSG]}... ({len(msg) - State.MAX_MSG} log lines truncated)' if len(msg) > State.MAX_MSG else msg
+        }
+        super().set_target_status(target_name, new_state, msg)
+
+
+class CleanupState(State):
+    def __init__(self, state_file) -> None:
+        super().__init__(state_file)
+    
+    def set_target_status(self, target_name, msg, code, recovered_space=None, removed_backups=None, total_size=None, max_size=None, max_num=None) -> None:
+        new_state = self.state
+        new_state[str(target_name)] = {
+            'timestamp': datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            'code': int(code),
+            'status': Nagios.get_status_by_code(code),
+            'recovered_space': recovered_space,
+            'removed_backups': removed_backups,
+            'total_size': total_size,
+            'max_size': max_size,
+            'max_num': max_num,
+            'msg': f'{msg[:State.MAX_MSG]}... ({len(msg) - State.MAX_MSG} log lines truncated)' if len(msg) > State.MAX_MSG else msg
+        }
+        super().set_target_status(target_name, new_state, msg)
+
+class ValidateState(State):
+    def __init__(self, state_file) -> None:
+        super().__init__(state_file)
+        
+    def set_target_status(self, target_name, invalid_backups: list[InvalidBackup], code, avg_size) -> None:
+        new_state = self.state
+        
+        new_state[str(target_name)] = {
+            'timestamp': datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            'code': int(code),
+            'status': Nagios.get_status_by_code(code),
+            'avg_size': avg_size,
+            'msg': [b.reason for b in invalid_backups],
+            'invalid_backups': [b.backup.path for b in invalid_backups],
+            'msg': f'{msg[:State.MAX_MSG]}... ({len(msg) - State.MAX_MSG} log lines truncated)' if len(msg) > State.MAX_MSG else msg
+        }
+        super().set_target_status(target_name, new_state, msg)
 
 
 def remove_file_or_dir(path) -> None:
@@ -1145,7 +1212,7 @@ if __name__ == "__main__":
         print(f"Config file '{args.conf}' is not valid YAML file, error:\n{e}")
         sys.exit(int(Nagios.CRITICAL))
         
-    if args.action == Action.VALIDATE.value:
+    if args.action == Action.CONF_CHECK.value:
         print(f"Config file '{args.conf}' is valid")
         sys.exit(int(Nagios.OK))
     
@@ -1169,6 +1236,9 @@ if __name__ == "__main__":
         if args.action == Action.CLEANUP.value:
             state = CleanupState(common_conf['files']['cleanup_state'])
             nagios_service = common_conf['nagios']['cleanup_service']
+        elif args.action == Action.VALIDATE.value:
+            state = ValidateState(common_conf['files']['validate_state'])
+            nagios_service = common_conf['nagios']['validate_service']
         else:
             state = RunState(common_conf['files']['run_state'])
             nagios_service = common_conf['nagios']['run_service']
@@ -1196,19 +1266,29 @@ if __name__ == "__main__":
                 if args.action == Action.RUN.value:
                     target.create_backup()
                     state.set_target_status(target, f'({get_display_size(target.backup.size)}) {target.backup.package}', Nagios.OK, target.elapsed_time_copy, target.elapsed_time_pack, target.transfer_speed_copy, target.transfer_speed_pack)
+                    
                 elif args.action == Action.CLEANUP.value:                
                     if target.get_backups_num() == 0: 
                         state.set_target_status(target, 'Not found any backup', Nagios.WARNING, 0, 0, 0, target.max_size, target.max_num)
                     else:
                         msg, total_recovered_space, total_removed_backups, total_size = target.cleanup()
                         state.set_target_status(target, msg, Nagios.OK, total_recovered_space, total_removed_backups, total_size, target.max_size, target.max_num)
+                        
+                elif args.actions == Action.VALIDATE.value:
+                    invalid_backups, avg_size = target.validate()
+                    if len(invalid_backups) > 0:
+                        state.set_target_status(target, invalid_backups, Nagios.WARNING, avg_size)
+                    else:
+                        state.set_target_status(target, [], Nagios.OK, avg_size)
+                        
                 else:
-                    raise TargetError(f"Action '{args.action}' is not valid option. Valid options are: [{Action.RUN.value}, {Action.CLEANUP.value}]")
+                    raise TargetError(f"Action '{args.action}' is not valid option. Valid options are: [{Action.RUN.value}, {Action.CLEANUP.value}, {Action.VALIDATE.value}]")
             except catch_exception_class as e:
                 code = e.code if hasattr(e, 'code') else Nagios.CRITICAL
                 state.set_target_status(target, str(e), code)
-            
-        state.remove_undefined_targets(list(conf["targets"]))
+        
+        if args.actions == Action.VALIDATE.value:
+            state.remove_undefined_targets(list(conf["targets"]))
 
         if not args.no_report:
             nagios.send_report_to_nagios(getattr(Nagios, str(state.get_most_failure_status())), state.get_summary())       
