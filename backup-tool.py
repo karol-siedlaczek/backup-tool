@@ -1049,7 +1049,7 @@ def parse_args():
         parser.add_argument('--skip-frequency',
             default=False,
             action='store_true',
-            help='Do not check if last backup should be skipped by "frequency" parameter'
+            help='Do not check if backup in type "push" should be skipped if "frequency" parameter does not allow'
         )
     if action == Action.CLEANUP.value:
         parser.add_argument('--force',
