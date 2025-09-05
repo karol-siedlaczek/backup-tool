@@ -934,10 +934,14 @@ class PullTarget(Target):
 
         
 class PushTarget(Target):    
-    def __init__(self, name, conf, default_conf, base_dest, scripts_dir, work_dir) -> None:
+    def __init__(self, name, conf, default_conf, base_dest, scripts_dir, work_dir, skip_frequency) -> None:
         super().__init__(name, base_dest, conf, default_conf, scripts_dir)
         self.work_dir = os.path.join(work_dir, self.name)
-        self.frequency = conf.get('frequency') or default_conf.get('frequency')
+        
+        if (skip_frequency or conf.get('skip_frequency') or (conf.get('frequency') == None and default_conf.get('skip_frequency'))):
+            self.frequency = 0
+        else:
+            self.frequency = conf.get('frequency') or default_conf.get('frequency')
     
     @property
     def work_dir(self) -> str:
@@ -955,18 +959,21 @@ class PushTarget(Target):
         
     @frequency.setter
     def frequency(self, value) -> None:  # Param examples: 16h = 16hours, 1d = 1 day, 3w = 3 weeks, 2m = 2 months
-        TargetValidator.validate_required_param('frequency', value)
-        match = TargetValidator.validate_match('frequency', r'^([\d]{1,4})\s?([h|d|m|w]{1})$', value)
-        number, date_attr = match.groups()
-        
-        if date_attr == 'h':
-            self._frequency = int(number)
-        elif date_attr == 'd':
-            self._frequency = int(number) * 24
-        elif date_attr == 'w':
-            self._frequency = int(number) * 7 * 24
-        elif date_attr == 'm':
-            self._frequency = int(number) * 30 * 24
+        if (isinstance(value, int) and value >= 0):
+            self._frequency = 0
+        else:
+            TargetValidator.validate_required_param('frequency', value)
+            match = TargetValidator.validate_match('frequency', r'^([\d]{1,4})\s?([h|d|m|w]{1})$', value)
+            number, date_attr = match.groups()
+            
+            if date_attr == 'h':
+                self._frequency = int(number)
+            elif date_attr == 'd':
+                self._frequency = int(number) * 24
+            elif date_attr == 'w':
+                self._frequency = int(number) * 7 * 24
+            elif date_attr == 'm':
+                self._frequency = int(number) * 30 * 24
     
     def create_backup(self) -> Backup:
         self.run_pre_hooks()
@@ -1038,6 +1045,11 @@ def parse_args():
             default=False,
             action='store_true',
             help='Disable sending state of this iteration to NSCA server defined in config file'
+        )
+        parser.add_argument('--skip-frequency',
+            default=False,
+            action='store_true',
+            help='Do not check if last backup should be skipped by "frequency" parameter'
         )
     if action == Action.CLEANUP.value:
         parser.add_argument('--force',
@@ -1173,7 +1185,7 @@ if __name__ == "__main__":
                     raise TargetError(f"Target not defined in '{args.conf}' config file")
                 
                 if target_conf.get('type') == BackupType.PUSH.value:
-                    target = PushTarget(target, target_conf, conf.get('default'), common_conf['dirs']['backups'], common_conf['dirs']['scripts'], common_conf['dirs']['work'])
+                    target = PushTarget(target, target_conf, conf.get('default'), common_conf['dirs']['backups'], common_conf['dirs']['scripts'], common_conf['dirs']['work'], args.skip_frequency)
                 elif target_conf.get('type') == BackupType.PULL.value:
                     target = PullTarget(target, target_conf, conf.get('default'), common_conf['dirs']['backups'], common_conf['dirs']['scripts'], args.stats_file if hasattr(args, 'stats_file') else None)
                 else:
