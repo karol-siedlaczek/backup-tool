@@ -174,6 +174,7 @@ class InfluxServer():
                     'status': stats.get('status'),
                     'msg': stats.get('msg'),
                     'timestamp': stats.get('timestamp'),
+                    'count': stats.get('count'),
                     'max_num': stats.get('max_num'),
                     'total_size': stats.get('total_size'),
                     'max_size': stats.get('max_size'),
@@ -705,6 +706,7 @@ class Target():
         
         total_recovered_space = 0
         total_removed_backups = 0
+        total_num = self.get_backups_num()
             
         if self.max_size:
             total_size = self.get_backups_size()
@@ -717,31 +719,37 @@ class Target():
                     if total_size + latest_backup.size * self.cleanup_ratio <= self.max_size:
                         msg = f'Cleanup finished, removed {total_removed_backups} backup/s, recovered {get_display_size(total_recovered_space)} ({get_display_size(total_size)} / {self.display_max_size})'
                         break
-                    elif target.get_backups_num() == 1 and not args.force:
-                        raise TargetCleanupError(f"Cleanup aborted, only 1 backup left but current max_size limit ({self.display_max_size}) is not enough for next backup * {self.cleanup_ratio} (~{get_display_size(latest_backup.size * self.cleanup_ratio)}), consider increasing the limit or use -f/--force to process cleanup")
-                    oldest_backup_size = remove_oldest_backup()
-                    total_removed_backups += 1
-                    total_recovered_space += oldest_backup_size
-                    total_size -= oldest_backup_size
-            else:
-                msg = f'No cleanup needed ({get_display_size(total_size)} / {get_display_size(self.max_size)})'
-        else:
-            total_num = self.get_backups_num()
-            
-            if total_num >= self.max_num:                      
-                log.info(f"Start cleanup, max number of backups exceeded ({total_num} / {self.max_num})")
-                
-                while total_num >= self.max_num:
-                    if total_num == 1 and not args.force:
-                        raise TargetCleanupError(f"Cleanup aborted, only 1 backup left and current max_num limit allows only for {self.max_num} backup, directory cannot be empty, consider increasing the limit or use -f/--force to process cleanup")
+                    elif total_num == 1 and not args.force:
+                        raise TargetCleanupError(
+                            f"Cleanup aborted, only 1 backup left but current max_size " +
+                            f"limit ({self.display_max_size}) is not enough for next backup * {self.cleanup_ratio} " +
+                            f"(~{get_display_size(latest_backup.size * self.cleanup_ratio)}), consider increasing the limit or use -f/--force to process cleanup"
+                        )
                     oldest_backup_size = remove_oldest_backup()
                     total_removed_backups += 1
                     total_num -= 1
                     total_recovered_space += oldest_backup_size
-                msg = f'Cleanup finished, removed {total_removed_backups} backup/s, recovered {get_display_size(total_recovered_space)} ({total_num} / {self.max_num})'
+                    total_size -= oldest_backup_size
             else:
-                msg = f'No cleanup needed ({total_num} / {self.max_num})'
-        return msg, total_recovered_space, total_removed_backups, total_size
+                msg = f'No cleanup needed ({get_display_size(total_size)} / {get_display_size(self.max_size)})'
+        elif total_num >= self.max_num:  
+            log.info(f"Start cleanup, max number of backups exceeded ({total_num} / {self.max_num})")
+            
+            while total_num >= self.max_num:
+                if total_num == 1 and not args.force:
+                    raise TargetCleanupError(
+                        f"Cleanup aborted, only 1 backup left and current max_num limit allows only for {self.max_num} backup, " +
+                        f"directory cannot be empty, consider increasing the limit or use -f/--force to process cleanup"
+                    )
+                oldest_backup_size = remove_oldest_backup()
+                total_removed_backups += 1
+                total_num -= 1
+                total_recovered_space += oldest_backup_size
+            msg = f'Cleanup finished, removed {total_removed_backups} backup/s, recovered {get_display_size(total_recovered_space)} ({total_num} / {self.max_num})'
+        else:
+            msg = f'No cleanup needed ({total_num} / {self.max_num})'
+            
+        return msg, total_recovered_space, total_removed_backups, total_size, total_num
 
     def validate(self) -> list[InvalidBackup]:
         total_num = self.get_backups_num()
@@ -1042,7 +1050,7 @@ class CleanupState(State):
     def __init__(self, state_file) -> None:
         super().__init__(state_file)
     
-    def set_target_status(self, target_name, msg, code, recovered_space=None, removed_backups=None, total_size=None, max_size=None, max_num=None) -> None:
+    def set_target_status(self, target_name, msg, code, recovered_space=None, removed_backups=None, total_size=None, total_num=None, max_size=None, max_num=None) -> None:
         new_state = self.state
         new_state[str(target_name)] = {
             'timestamp': datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
@@ -1051,6 +1059,7 @@ class CleanupState(State):
             'recovered_space': recovered_space,
             'removed_backups': removed_backups,
             'total_size': total_size,
+            'count': total_num,
             'max_size': max_size,
             'max_num': max_num,
             'msg': f'{msg[:State.MAX_MSG]}... ({len(msg) - State.MAX_MSG} log lines truncated)' if len(msg) > State.MAX_MSG else msg
@@ -1271,10 +1280,10 @@ if __name__ == "__main__":
                     if target.get_backups_num() == 0: 
                         state.set_target_status(target, 'Not found any backup', Nagios.WARNING, 0, 0, 0, target.max_size, target.max_num)
                     else:
-                        msg, total_recovered_space, total_removed_backups, total_size = target.cleanup()
-                        state.set_target_status(target, msg, Nagios.OK, total_recovered_space, total_removed_backups, total_size, target.max_size, target.max_num)
+                        msg, total_recovered_space, total_removed_backups, total_size, total_num = target.cleanup()
+                        state.set_target_status(target, msg, Nagios.OK, total_recovered_space, total_removed_backups, total_size, total_num, target.max_size, target.max_num)
                         
-                elif args.actions == Action.VALIDATE.value:
+                elif args.action == Action.VALIDATE.value:
                     invalid_backups, avg_size = target.validate()
                     if len(invalid_backups) > 0:
                         state.set_target_status(target, invalid_backups, Nagios.WARNING, avg_size)
