@@ -947,7 +947,7 @@ class PushTarget(Target):
                     raise TargetError(f"Moving files from '{self.work_dir}' working directory to '{new_backup_path}' failed: {e}: {e.stderr}")
 
                 log.info(f"Files moved from '{self.work_dir}' working directory to '{new_backup_path}' path")
-                return super().create_backup(new_backup_path, latest_backup)
+                return super().create_backup(new_backup_path)
             else:
                 raise TargetError(f"Not found any file to process in '{self.work_dir}' work directory")
         elif files_in_workdir:
