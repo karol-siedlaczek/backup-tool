@@ -36,9 +36,9 @@ class Defaults(Enum):
         return None
     
 class RequiredCommonParams(Defaults):
-    NAGIOS = ['host', 'port', 'host_service', 'run_service', 'cleanup_service']
+    NAGIOS = ['host', 'port', 'host_service', 'run_service', 'cleanup_service', 'validate_service']
     INFLUX = ['host', 'port', 'user', 'database', 'password_file']
-    FILES = ['log', 'hosts', 'run_state', 'cleanup_state']
+    FILES = ['log', 'hosts', 'run_state', 'cleanup_state', 'validate_state']
     DIRS = ['backups', 'work', 'scripts']
     
     @staticmethod
@@ -56,7 +56,7 @@ class RequiredCommonParams(Defaults):
                         raise EnvironmentError(f"required parameter 'common.{parent_param}.{child_param}' is not defined")
         except EnvironmentError as e:
             print(f"File '{config_file}' is not valid config: {e}")
-            sys.exit(Nagios.UNKNOWN)
+            sys.exit(int(Nagios.UNKNOWN))
 
 class BackupType(Defaults):
     PUSH = 'push'
@@ -769,11 +769,12 @@ class Target():
             size_diff_ratio = backup_size / avg_size
             
             if size_diff_ratio > self.min_valid_size_diff_ratio:
-                reason = f"Backup '{backup.path}' ({get_display_size(backup_size)}) size is less than minimum valid ratio ({self.min_valid_size_diff_ratio}) compared to the average backup size '{avg_size_display}' for this target"
+                reason = f"Backup '{backup.path}' ({get_display_size(backup_size)}) size is less than minimum " + \
+                    f"valid ratio ({self.min_valid_size_diff_ratio}) compared to the avg. backup size '{avg_size_display}'"
                 suspicious_backups.append(InvalidBackup(backup, reason))
         
         if len(suspicious_backups) > 0:
-            log.warn(f"Validation finished, found {len(suspicious_backups)} backups which did not passed validation checks")
+            log.warning(f"Validation finished, found {len(suspicious_backups)} backups which did not passed validation checks")
         else:
             log.info(f"Validation finished, all backups ({total_num}) are valid")
         return suspicious_backups, avg_size
@@ -1072,15 +1073,15 @@ class ValidateState(State):
         
     def set_target_status(self, target_name, invalid_backups: list[InvalidBackup], code, avg_size) -> None:
         new_state = self.state
+        msg = "Found validation errors in backups"
         
         new_state[str(target_name)] = {
             'timestamp': datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
             'code': int(code),
             'status': Nagios.get_status_by_code(code),
             'avg_size': avg_size,
-            'msg': [b.reason for b in invalid_backups],
-            'invalid_backups': [b.backup.path for b in invalid_backups],
-            'msg': f'{msg[:State.MAX_MSG]}... ({len(msg) - State.MAX_MSG} log lines truncated)' if len(msg) > State.MAX_MSG else msg
+            'msg': msg,
+            'invalid_backups': [{ 'path': b.backup.path, 'reason': b.reason } for b in invalid_backups]
         }
         super().set_target_status(target_name, new_state, msg)
 
@@ -1106,27 +1107,18 @@ def parse_args():
         default=1,
         help=f'Default verbose level is 1 (INFO)'
     )
-    if action in [Action.CLEANUP.value, Action.RUN.value]:
+    if action in [Action.CLEANUP.value, Action.RUN.value, Action.VALIDATE.value]:
         parser.add_argument('-t', '--targets',
             required=True,
             nargs='+',
             help='Target list defined in config file under "targets" markup'
-        )
-        parser.add_argument('-m', '--mode',
-            default='full',
-            choices=['full', 'inc'],
-            help=f'Not implemented yet, currently all backups are full'
         )
         parser.add_argument('--no-report',
             default=False,
             action='store_true',
             help='Disable sending state of this iteration to NSCA server defined in config file'
         )
-        parser.add_argument('--skip-frequency',
-            default=False,
-            action='store_true',
-            help='Do not check if backup in type "push" should be skipped if "frequency" parameter does not allow'
-        )
+            
     if action == Action.CLEANUP.value:
         parser.add_argument('--force',
             default=False,
@@ -1136,6 +1128,16 @@ def parse_args():
                     'but with this argument defined? No one will care about your last backups, if conditions allow even last backup will be deleted'
         )
     elif action == Action.RUN.value:
+        parser.add_argument('--skip-frequency',
+            default=False,
+            action='store_true',
+            help='Do not check if backup in type "push" should be skipped if "frequency" parameter does not allow'
+        )
+        parser.add_argument('-m', '--mode',
+            default='full',
+            choices=['full', 'inc'],
+            help=f'Not implemented yet, currently all backups are full'
+        )
         parser.add_argument('--stats-file',
             type=str,
             help=f'Redirect rsync stats and progress to file pointed by this argument'
@@ -1240,7 +1242,7 @@ if __name__ == "__main__":
         except (OSError, FileNotFoundError, ConnectionError) as e:
             print(f"ERROR: Connection to influx server failed: {e}")
             log.error(f"ERROR: Connection to influx server failed: {e}")
-            sys.exit(Nagios.WARNING)
+            sys.exit(int(Nagios.WARNING))
     else:
         if args.action == Action.CLEANUP.value:
             state = CleanupState(common_conf['files']['cleanup_state'])
@@ -1264,9 +1266,9 @@ if __name__ == "__main__":
                     raise TargetError(f"Target not defined in '{args.conf}' config file")
                 
                 if target_conf.get('type') == BackupType.PUSH.value:
-                    target = PushTarget(target, target_conf, conf.get('default'), common_conf['dirs']['backups'], common_conf['dirs']['scripts'], common_conf['dirs']['work'], args.skip_frequency)
+                    target = PushTarget(target, target_conf, conf.get('default'), common_conf['dirs']['backups'], common_conf['dirs']['scripts'], common_conf['dirs']['work'], getattr(args, "skip_frequency", False))
                 elif target_conf.get('type') == BackupType.PULL.value:
-                    target = PullTarget(target, target_conf, conf.get('default'), common_conf['dirs']['backups'], common_conf['dirs']['scripts'], args.stats_file if hasattr(args, 'stats_file') else None)
+                    target = PullTarget(target, target_conf, conf.get('default'), common_conf['dirs']['backups'], common_conf['dirs']['scripts'], getattr(args, "stats_file", None))
                 else:
                     raise TargetError(f"Type '{target_conf.get('type')}' is not valid option. Valid options are: [{BackupType.PUSH.value}, {BackupType.PULL.value}]")
                 
@@ -1295,10 +1297,9 @@ if __name__ == "__main__":
             except catch_exception_class as e:
                 code = e.code if hasattr(e, 'code') else Nagios.CRITICAL
                 state.set_target_status(target, str(e), code)
-        
-        if args.action == Action.VALIDATE.value:
-            state.remove_undefined_targets(list(conf["targets"]))
 
         if not args.no_report:
-            nagios.send_report_to_nagios(getattr(Nagios, str(state.get_most_failure_status())), state.get_summary())       
+            nagios.send_report_to_nagios(getattr(Nagios, str(state.get_most_failure_status())), state.get_summary())
+        
+        state.remove_undefined_targets(list(conf["targets"]))
     sys.exit(int(Nagios.OK))
