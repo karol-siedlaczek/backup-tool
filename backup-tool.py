@@ -769,8 +769,8 @@ class Target():
             size_diff_ratio = backup_size / avg_size
             
             if size_diff_ratio < self.min_valid_size_diff_ratio:
-                reason = f"Backup '{backup.path}' ({get_display_size(backup_size)}) size is less than minimum " + \
-                    f"valid ratio ({self.min_valid_size_diff_ratio}) compared to the avg. backup size '{avg_size_display}'"
+                reason = f"Backup size ({get_display_size(backup_size)}) is less than minimum " + \
+                    f"valid ratio ({self.min_valid_size_diff_ratio}) compared to the average backup size '{avg_size_display}'"
                 suspicious_backups.append(InvalidBackup(backup, reason))
         
         if len(suspicious_backups) > 0:
