@@ -1073,6 +1073,7 @@ class ValidateState(State):
         
     def set_target_status(self, target_name, invalid_backups: list[InvalidBackup], code, avg_size) -> None:
         new_state = self.state
+        if lenIinvalid_backups
         msg = f"Validation failed for {len(invalid_backups)} backups"
         
         new_state[str(target_name)] = {
