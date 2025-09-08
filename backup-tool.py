@@ -768,7 +768,7 @@ class Target():
             backup_size = backup.size
             size_diff_ratio = backup_size / avg_size
             
-            if size_diff_ratio > self.min_valid_size_diff_ratio:
+            if size_diff_ratio < self.min_valid_size_diff_ratio:
                 reason = f"Backup '{backup.path}' ({get_display_size(backup_size)}) size is less than minimum " + \
                     f"valid ratio ({self.min_valid_size_diff_ratio}) compared to the avg. backup size '{avg_size_display}'"
                 suspicious_backups.append(InvalidBackup(backup, reason))
@@ -1073,7 +1073,7 @@ class ValidateState(State):
         
     def set_target_status(self, target_name, invalid_backups: list[InvalidBackup], code, avg_size) -> None:
         new_state = self.state
-        msg = "Found validation errors in backups"
+        msg = f"Validation failed for {len(invalid_backups)} backups"
         
         new_state[str(target_name)] = {
             'timestamp': datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
