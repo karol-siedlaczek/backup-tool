@@ -1296,7 +1296,7 @@ if __name__ == "__main__":
                 code = e.code if hasattr(e, 'code') else Nagios.CRITICAL
                 state.set_target_status(target, str(e), code)
         
-        if args.actions == Action.VALIDATE.value:
+        if args.action == Action.VALIDATE.value:
             state.remove_undefined_targets(list(conf["targets"]))
 
         if not args.no_report:
