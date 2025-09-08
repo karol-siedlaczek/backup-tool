@@ -1073,8 +1073,10 @@ class ValidateState(State):
         
     def set_target_status(self, target_name, invalid_backups: list[InvalidBackup], code, avg_size) -> None:
         new_state = self.state
-        if lenIinvalid_backups
-        msg = f"Validation failed for {len(invalid_backups)} backups"
+        if len(invalid_backups) > 0:
+            msg = f"Validation failed for {len(invalid_backups)} backups"
+        else:
+            msg = f"Validation successful"
         
         new_state[str(target_name)] = {
             'timestamp': datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
