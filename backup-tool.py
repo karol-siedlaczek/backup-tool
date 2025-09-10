@@ -8,7 +8,8 @@ import grp
 import yaml
 import math
 import argparse
-from requests import packages
+from requests import packages, post
+from requests.exceptions import HTTPError
 from enum import Enum
 from glob import glob
 from influxdb import InfluxDBClient
@@ -22,7 +23,9 @@ class Defaults(Enum):
     @staticmethod
     def list(enum_class=None) -> list:
         class_name = enum_class or Defaults
-        return [ name.lower() for name, member in class_name.__members__.items() ]
+        return [member.value for member in class_name]
+        #class_name = enum_class or Defaults
+        #return [ name.lower() for name, member in class_name.__members__.items() ]
     
     def __str__(self) -> str:
         return self.name.lower() if isinstance(self.name, str) else self.name
@@ -34,20 +37,19 @@ class Defaults(Enum):
             if member.value == value:
                 return member
         return None
-    
+
 class RequiredCommonParams(Defaults):
-    NAGIOS = ['host', 'port', 'host_service', 'run_service', 'cleanup_service', 'validate_service']
-    INFLUX = ['host', 'port', 'user', 'database', 'password_file']
-    FILES = ['log', 'hosts', 'run_state', 'cleanup_state', 'validate_state']
-    DIRS = ['backups', 'work', 'scripts']
+    NAGIOS = ['host', 'port', 'host_service', 'run_service', 'cleanup_service']
+    FILE = ['log', 'run_state', 'cleanup_state']
+    DIR = ['backup', 'work', 'script']
     
     @staticmethod
-    def validate(commons, config_file) -> None:
+    def validate(common_conf, config_file) -> None:
         try:
-            if not commons:
+            if not common_conf:
                 raise EnvironmentError("section 'common' is not defined")
             for parent_param in list(RequiredCommonParams):
-                parent_attr = commons.get(str(parent_param))
+                parent_attr = common_conf.get(str(parent_param))
                 if not parent_attr:
                     raise EnvironmentError(f"required parameter 'common.{parent_param}' is not defined")
                 for child_param in parent_param.value:
@@ -71,9 +73,13 @@ class Format(Defaults):
 class Action(Defaults):
     CLEANUP = 'cleanup'
     RUN = 'run'
-    PUSH_STATS = 'push-stats'
+    PUSH_METRICS = 'push-metrics'
     VALIDATE = 'validate'
     CONF_CHECK = 'conf-check'
+    
+class MetricServerType(Defaults):
+    INFLUX = 'influx'
+    VICTORIA_METRICS = 'victoria-metrics'
 
 class Nagios(str, Enum):
     OK = 0
@@ -113,78 +119,182 @@ class TargetCleanupError(TargetException):
     def __init__(self, msg) -> None:
         super().__init__(Nagios.CRITICAL, msg)
 
-class InfluxServer():
-    __slots__ = ['host', 'port', 'client']
+class MetricServer():
+    __slots__ = ['host', 'port', 'type', 'influx_client', 'auth', 'url']
     
-    def __init__(self, host, port, user, password_file, database, verify_ssl=True) -> None:
+    def __init__(self, conf):
         packages.urllib3.disable_warnings()
-        if not os.path.isfile(password_file):
-            raise FileNotFoundError(f"File with password to connect {host}:{port} influx server does not exist or not valid file")
-        elif os.stat(password_file).st_size == 0:
-            raise OSError(f"File with password to connect {host}:{port} influx server is empty, provide single line with password")
-        with open(password_file, 'r') as f:
-            password = f.read().strip()
-        self.client = InfluxDBClient(host, port, user, password, database, ssl=True, verify_ssl=verify_ssl)
-        self.client.ping()
-        self.host = host
-        self.port = port
+        if not conf:
+            raise EnvironmentError(f"No metric server conf found in 'common.metric_server' section in config file")
         
-    def push_run_stats(self, run_stats_file) -> None:        
-        with open(run_stats_file, "r") as f:
-            run_stats = yaml.safe_load(f)
+        try:
+            password_file = conf.get('password_file')
+            if password_file:
+                Validator.validate_file_exist('common.metric_server.password_file', password_file)
+                
+                if os.stat(password_file).st_size == 0:
+                    raise OSError(f"Password file is empty, provide single line with password, file: {password_file}")
+                else:
+                    with open(password_file, 'r') as f:
+                        password = f.read().strip()
+            else:
+                password = None
             
-        points = []
-        log.debug(f'Start pushing run stats to {self.host}:{self.port}')
+            metric_server_type = conf.get('type')
+            Validator.validate_allowed_values('common.metric_server.type', metric_server_type, Defaults.list(MetricServerType))
         
-        for target, stats in run_stats.items():
-            copy_stats = stats.get('times').get('copy')
-            pack_stats = stats.get('times').get('pack')
+            host = conf.get('host')
+            port = conf.get('port')
+            user = conf.get('user')
+            Validator.validate_required_param('common.metric_server.host', host)
+            Validator.validate_required_param('common.metric_server.port', port)
+            Validator.validate_port('common.metric_server.port', port)
+            self.host = host
+            self.port = port
+            self.type = metric_server_type
+            
+            if metric_server_type == MetricServerType.INFLUX.value:
+                Validator.validate_required_param('common.metric_server.user', user)
+                database = conf.get('database')
+                ssl = conf.get('ssl')
+                verify_ssl = conf.get('verify_ssl')
+                
+                Validator.validate_required_param('common.metric_server.database', database)
+                
+                if ssl:
+                    Validator.validate_type('common.metric_server.ssl', bool, ssl)
+                if verify_ssl:
+                    Validator.validate_type('common.metric_server.verify_ssl', bool, verify_ssl)
+                
+                self.influx_client = InfluxDBClient(
+                    self.host, 
+                    self.port, 
+                    user, 
+                    password, 
+                    database, 
+                    ssl=ssl, 
+                    verify_ssl=verify_ssl
+                )
+                self.influx_client.ping()
+            elif metric_server_type == MetricServerType.VICTORIA_METRICS.value:
+                self.auth = (user, password) if password else None
+                self.url = f"http://{self.host}:{self.port}/write"
+        except TargetError as e:
+            raise EnvironmentError(e)
+        
+    def push_run_metrics(self, stats_file) -> None:
+        log.debug(f'Start pushing run metrics to {self.host}:{self.port}')
+        with open(stats_file, "r") as f:
+            stats = yaml.safe_load(f)
+            
+        if self.type == MetricServerType.INFLUX.value:
+            self.__push_run_metrics_to_influx(stats)
+        elif self.type == MetricServerType.VICTORIA_METRICS.value:
+            self.__push_run_metrics_to_victoria_metrics(stats)
+        log.debug(f'Run metrics pushed to {self.host}:{self.port}')
+    
+    def __push_run_metrics_to_influx(self, stats) -> None:            
+        points = []
+        for target, stat in stats.items():
+            copy_stat = stat.get('time').get('copy')
+            pack_stat = stat.get('time').get('pack')
             points.append({
                 'measurement': 'run',
                 'tags': {
                     'target': target
                 },
                 'fields': {
-                    'status': stats.get('status'),
-                    'msg': stats.get('msg'),
-                    'timestamp': stats.get('timestamp'),
-                    'copy_duration_seconds': copy_stats.get('duration'),
-                    'copy_transfer_speed_bytes': copy_stats.get('transfer_speed'),
-                    'pack_duration_seconds': pack_stats.get('duration'),
-                    'pack_transfer_speed_bytes': pack_stats.get('transfer_speed')
+                    'status': stat.get('status'),
+                    'msg': stat.get('msg'),
+                    'type': stat.get('type'),
+                    'timestamp': stat.get('timestamp'),
+                    'copy_duration_seconds': copy_stat.get('duration'),
+                    'copy_transfer_speed_bytes': copy_stat.get('transfer_speed'),
+                    'pack_duration_seconds': pack_stat.get('duration'),
+                    'pack_transfer_speed_bytes': pack_stat.get('transfer_speed')
                 }
             })
-        self.client.write_points(points)
-        log.debug(f'Run stats pushed to {self.host}:{self.port}')
-    
-    def push_cleanup_stats(self, cleanup_stats_file) -> None:     
-        with open(cleanup_stats_file, "r") as f:
-            cleanup_stats = yaml.safe_load(f)
-        self.client
-        points = []
-        log.debug(f'Start pushing cleanup stats to {self.host}:{self.port}')
+        self.influx_client.write_points(points)
         
-        for target, stats in cleanup_stats.items():
+    def __push_run_metrics_to_victoria_metrics(self, stats) -> None:
+        lines = []
+        for target, stat in stats.items():
+            copy_stat = stat.get('time').get('copy')
+            pack_stat = stat.get('time').get('pack')
+            
+            tags = f"target={target}"
+            fields = [
+                f"status={stats.get('status', 0)}i",
+                f"type={stats.get('type')}",
+                f'msg="{stats.get("msg", "")}"',
+                f"timestamp={stats.get('timestamp', 0)}i",
+                f"copy_duration_seconds={copy_stat.get('duration', 0)}",
+                f"copy_transfer_speed_bytes={copy_stat.get('transfer_speed', 0)}",
+                f"pack_duration_seconds={pack_stat.get('duration', 0)}",
+                f"pack_transfer_speed_bytes={pack_stat.get('transfer_speed', 0)}"
+            ]
+            
+            line = f"run,{tags} " + ",".join(fields)
+            lines.append(line)
+            
+        body = "\n".join(lines) + "\n"
+        response = post(self.url, data=body, auth=self.auth)
+        response.raise_for_status()
+    
+    def push_cleanup_metrics(self, stats_file) -> None:
+        log.debug(f'Start pushing cleanup metrics to {self.host}:{self.port}')
+        with open(stats_file, "r") as f:
+            stats = yaml.safe_load(f)
+            
+        if self.type == MetricServerType.INFLUX.value:
+            self.__push_cleanup_metrics_to_influx(stats)
+        elif self.type == MetricServerType.VICTORIA_METRICS.value:
+            self.__push_cleanup_metrics_to_victoria_metrics(stats)
+        log.debug(f'Cleanup metrics pushed to {self.host}:{self.port}')
+    
+    def __push_cleanup_metrics_to_influx(self, stats) -> None:
+        points = []        
+        for target, stat in stats.items():
             points.append({
                 'measurement': 'cleanup',
                 'tags': {
                     'target': target
                 },
                 'fields': {
-                    'status': stats.get('status'),
-                    'msg': stats.get('msg'),
-                    'timestamp': stats.get('timestamp'),
-                    'count': stats.get('count'),
-                    'max_num': stats.get('max_num'),
-                    'total_size': stats.get('total_size'),
-                    'max_size': stats.get('max_size'),
-                    'recovered_space': stats.get('recovered_space'),
-                    'removed_backups': stats.get('removed_backups')
+                    'status': stat.get('status'),
+                    'msg': stat.get('msg'),
+                    'type': stat.get('type'),
+                    'timestamp': stat.get('timestamp'),
+                    'count': stat.get('count'),
+                    'max_num': stat.get('max_num'),
+                    'total_size': stat.get('total_size'),
+                    'max_size': stat.get('max_size'),
+                    'recovered_space': stat.get('recovered_space'),
+                    'removed_backups': stat.get('removed_backups')
                 }
             })
-        self.client.write_points(points)
-        log.debug(f'Cleanup stats pushed to {self.host}:{self.port}')
+        self.influx_client.write_points(points)
+        
+    def __push_cleanup_metrics_to_victoria_metrics(self, stats) -> None:
+        pass
     
+    def push_validate_metrics(self, stats_file) -> None:
+        log.debug(f'Start pushing validation metrics to {self.host}:{self.port}')
+        with open(stats_file, "r") as f:
+            stats = yaml.safe_load(f)
+            
+        if self.type == MetricServerType.INFLUX.value:
+            self.__push_validate_metrics_to_influx(stats)
+        elif self.type == MetricServerType.VICTORIA_METRICS.value:
+            self.__push_validate_metrics_to_victoria_metrics(stats)
+        log.debug(f'Validation metrics pushed to {self.host}:{self.port}')
+    
+    def __push_validate_metrics_to_influx(self, stats) -> None:
+        pass
+        
+    def __push_validate_metrics_to_victoria_metrics(self, stats) -> None:
+        pass
+
     
 class NagiosServer():
     __slots__ = ['nsca_bin', 'echo_bin', 'host', 'port', 'host_service', 'service']
@@ -280,6 +390,7 @@ class Backup():
         except subprocess.CalledProcessError as e:
             raise TargetError(f"Saving manifest file from '{self.package}' failed: {e}: {e.stderr}")
 
+        # TODO - Some problems during encrypted packages
         # if format == Format.PACKAGE.value or format == Format.ENCRYPTED_PACKAGE.value or Format.COMPRESSED_PACKAGE:
         #     self.manifest_file = manifest_file.replace('.txt', '.tar')
             
@@ -321,7 +432,7 @@ class InvalidBackup():
         self.backup = backup
         self.reason = reason
 
-class TargetValidator():
+class Validator():
     @staticmethod
     def validate_required_param(param, value) -> None:
         if not value:
@@ -338,7 +449,23 @@ class TargetValidator():
     def validate_min_value(param, min_value, value) -> None:
         if value < min_value:
             raise TargetError(f"Parameter '{param}' with '{value}' value is too small, minimal value is {min_value}")
+    
+    @staticmethod
+    def validate_max_value(param, max_value, value) -> None:
+        if value > max_value:
+            raise TargetError(f"Parameter '{param}' with '{value}' value is too big, maximum value is {max_value}")
 
+    @staticmethod
+    def validate_port(param, value) -> None:
+        min_value = 1
+        max_value = 65535
+        try:
+            Validator.validate_type(param, int, value)
+            Validator.validate_min_value(param, min_value, value)
+            Validator.validate_max_value(param, max_value, value)
+        except TargetError as _:
+            raise TargetError(f"Parameter '{param}' is not valid port number, value ({value}) is out of range ({min_value}-{max_value})")
+    
     @staticmethod
     def validate_type(param, class_type, value, custom_msg=None) -> None:
         if not isclass(class_type):
@@ -464,20 +591,20 @@ class Target():
     
     @type.setter
     def type(self, value) -> None:
-        TargetValidator.validate_required_param('type', value)
-        TargetValidator.validate_allowed_values('type', value, Defaults.list(BackupType))
+        Validator.validate_required_param('type', value)
+        Validator.validate_allowed_values('type', value, Defaults.list(BackupType))
         self._type = value
         
     @dest.setter
     def dest(self, value) -> None:
-        TargetValidator.validate_required_param('dest', value)
-        TargetValidator.validate_absolute_dir_path('dest', value)
+        Validator.validate_required_param('dest', value)
+        Validator.validate_absolute_dir_path('dest', value)
         self._dest = value
     
     @max_size.setter
     def max_size(self, value) -> None:
         if value:
-            match = TargetValidator.validate_match('max_size', r'^([1-9]{1}[\d]*)\s?(B|KB|MB|GB|TB)$', value)
+            match = Validator.validate_match('max_size', r'^([1-9]{1}[\d]*)\s?(B|KB|MB|GB|TB)$', value)
             size, unit = match.groups()
             
             if unit == 'B':
@@ -496,8 +623,8 @@ class Target():
     @max_num.setter
     def max_num(self, value) -> None:
         if value:
-            TargetValidator.validate_type('max_num', int, value)
-            TargetValidator.validate_min_value('max_num', 2, value)
+            Validator.validate_type('max_num', int, value)
+            Validator.validate_min_value('max_num', 2, value)
             self._max_num = value
         else:
             self._max_num = None
@@ -505,34 +632,34 @@ class Target():
     @pre_hooks.setter
     def pre_hooks(self, value) -> None:
         if value:
-            TargetValidator.validate_type('pre_hooks', list, value)
+            Validator.validate_type('pre_hooks', list, value)
             self._pre_hooks = value
         else:
             self._pre_hooks = []
     
     @format.setter
     def format(self, value) -> None:
-        TargetValidator.validate_required_param('format', value)
-        TargetValidator.validate_allowed_values('format', value, Defaults.list(Format))
+        Validator.validate_required_param('format', value)
+        Validator.validate_allowed_values('format', value, Defaults.list(Format))
         self._format = value
     
     @owner.setter
     def owner(self, value) -> None:
-        TargetValidator.validate_required_param('owner', value)
-        TargetValidator.validate_type('owner', str, value)
+        Validator.validate_required_param('owner', value)
+        Validator.validate_type('owner', str, value)
         self._owner = value
     
     @permissions.setter
     def permissions(self, value) -> None:
-        TargetValidator.validate_required_param('permissions', value)
-        TargetValidator.validate_match('permissions', r'^[0-7]{3}$', value)
+        Validator.validate_required_param('permissions', value)
+        Validator.validate_match('permissions', r'^[0-7]{3}$', value)
         self._permissions = value
     
     @encryption_key.setter
     def encryption_key(self, value) -> None:
         if self.format == Format.ENCRYPTED_PACKAGE.value:
-            TargetValidator.validate_required_param('encryption_key', value)
-            TargetValidator.validate_type('encryption_key', str, value)
+            Validator.validate_required_param('encryption_key', value)
+            Validator.validate_type('encryption_key', str, value)
             self._encryption_key = value
         else:
             self._encryption_key = None
@@ -813,28 +940,37 @@ class PullTarget(Target):
     def stats_file(self) -> str:
         return self._stats_file
     
+    @property
+    def rsync_port(self) -> str:
+        return self._rsync_port
+    
     @sources.setter
     def sources(self, value) -> None:
-        TargetValidator.validate_required_param('sources', value)
-        TargetValidator.validate_type('sources', list, value)
+        Validator.validate_required_param('sources', value)
+        Validator.validate_type('sources', list, value)
         self._sources = value
     
     @timeout.setter
     def timeout(self, value) -> None:
-        TargetValidator.validate_required_param('timeout', value)
-        TargetValidator.validate_type('timeout', int, value)
+        Validator.validate_required_param('timeout', value)
+        Validator.validate_type('timeout', int, value)
         self._timeout = value
     
     @password_file.setter
     def password_file(self, value) -> None:
-        TargetValidator.validate_required_param('password_file', value)
-        TargetValidator.validate_file_exist('password_file', value)
+        Validator.validate_required_param('password_file', value)
+        Validator.validate_file_exist('password_file', value)
         self._password_file = value
+    
+    @rsync_port.setter
+    def rsync_port(self, value) -> None:
+        Validator.validate_port('rsync_port', value)
+        self._rsync_port = value
     
     @exclude.setter
     def exclude(self, value) -> None:
         if value:
-            TargetValidator.validate_type('exclude', list, value)
+            Validator.validate_type('exclude', list, value)
             self._exclude = value
         else:
             self._exclude = None
@@ -842,7 +978,7 @@ class PullTarget(Target):
     @stats_file.setter
     def stats_file(self, value) -> None:
         if value:
-            TargetValidator.validate_file_path(file_path=value, custom_msg=f"Path to stats file '{value}' defined with --stats-file is not valid file path")
+            Validator.validate_file_path(file_path=value, custom_msg=f"Path to stats file '{value}' defined with --stats-file is not valid file path")
             self._stats_file = value
         else:
             self._stats_file = None
@@ -900,8 +1036,8 @@ class PushTarget(Target):
     
     @work_dir.setter
     def work_dir(self, value) -> None:
-        TargetValidator.validate_required_param('work_dir', value)
-        TargetValidator.validate_absolute_dir_path('work_dir', value)
+        Validator.validate_required_param('work_dir', value)
+        Validator.validate_absolute_dir_path('work_dir', value)
         self._work_dir = value
         
     @frequency.setter
@@ -909,8 +1045,8 @@ class PushTarget(Target):
         if (isinstance(value, int) and value >= 0):
             self._frequency = 0
         else:
-            TargetValidator.validate_required_param('frequency', value)
-            match = TargetValidator.validate_match('frequency', r'^([\d]{1,4})\s?([h|d|m|w]{1})$', value)
+            Validator.validate_required_param('frequency', value)
+            match = Validator.validate_match('frequency', r'^([\d]{1,4})\s?([h|d|m|w]{1})$', value)
             number, date_attr = match.groups()
             
             if date_attr == 'h':
@@ -1026,13 +1162,14 @@ class RunState(State):
     def __init__(self, state_file) -> None:
         super().__init__(state_file)
     
-    def set_target_status(self, target_name, msg, code, elapsed_time_copy=None, elapsed_time_pack=None, transfer_speed_copy=None, transfer_speed_pack=None) -> None:
+    def set_target_status(self, target_name, backup_type, msg, code, elapsed_time_copy=None, elapsed_time_pack=None, transfer_speed_copy=None, transfer_speed_pack=None) -> None:
         new_state = self.state
         new_state[str(target_name)] = {
             'timestamp': datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
             'code': int(code),
             'status': Nagios.get_status_by_code(code),
-            'times': {
+            'type': backup_type,
+            'time': {
                 'copy': {
                     'duration': elapsed_time_copy,
                     'transfer_speed': transfer_speed_copy
@@ -1051,12 +1188,13 @@ class CleanupState(State):
     def __init__(self, state_file) -> None:
         super().__init__(state_file)
     
-    def set_target_status(self, target_name, msg, code, recovered_space=None, removed_backups=None, total_size=None, total_num=None, max_size=None, max_num=None) -> None:
+    def set_target_status(self, target_name, backup_type, msg, code, recovered_space=None, removed_backups=None, total_size=None, total_num=None, max_size=None, max_num=None) -> None:
         new_state = self.state
         new_state[str(target_name)] = {
             'timestamp': datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
             'code': int(code),
             'status': Nagios.get_status_by_code(code),
+            'type': backup_type,
             'recovered_space': recovered_space,
             'removed_backups': removed_backups,
             'total_size': total_size,
@@ -1071,7 +1209,7 @@ class ValidateState(State):
     def __init__(self, state_file) -> None:
         super().__init__(state_file)
         
-    def set_target_status(self, target_name, invalid_backups: list[InvalidBackup], code, avg_size) -> None:
+    def set_target_status(self, target_name, backup_type, invalid_backups: list[InvalidBackup], code, avg_size) -> None:
         new_state = self.state
         if len(invalid_backups) > 0:
             msg = f"Validation failed for {len(invalid_backups)} backups"
@@ -1082,6 +1220,7 @@ class ValidateState(State):
             'timestamp': datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
             'code': int(code),
             'status': Nagios.get_status_by_code(code),
+            'type': backup_type,
             'avg_size': avg_size,
             'msg': msg,
             'invalid_backups': [{ 'path': b.backup.path, 'reason': b.reason } for b in invalid_backups]
@@ -1160,11 +1299,10 @@ def get_display_size(size) -> str:
 def get_path_size(path) -> int:
     if os.path.exists(path):
         try:
-            output = run_cmd(f"du -sb {path}").split('\t')[0]
+            path_size = run_cmd(f"du -sb {path}").split('\t')[0]
         except subprocess.CalledProcessError as e:
             raise TargetError(f"Counting total size of path failed: {e}: {e.stderr}")
-        else:
-            return int(output)
+        return int(path_size)
     else:
         return 0
 
@@ -1213,7 +1351,6 @@ def run_cmd(cmd, check=True) -> str:
         text=True, 
         executable="/bin/bash"
     )
-    # process = subprocess.run(shlex.split(cmd), stdin=subprocess.DEVNULL, stderr=subprocess.PIPE, stdout=subprocess.PIPE, check=check, text=True)
     return process.stdout or process.stderr
 
 if __name__ == "__main__":
@@ -1232,29 +1369,40 @@ if __name__ == "__main__":
     
     common_conf = conf.get('common')
     RequiredCommonParams.validate(common_conf, args.conf)
-    log = get_logger(common_conf['files']['log'], args.verbose)
+    log = get_logger(common_conf['file']['log'], args.verbose)
     catch_exception_class = TargetException if args.verbose > 1 else Exception
     target = '-'
 
-    if args.action == Action.PUSH_STATS.value:
+    if args.action == Action.PUSH_METRICS.value:
+        exit_code = int(Nagios.OK)
+        msg = ""
+        
         try:
-            influxdb = InfluxServer(common_conf['influx']['host'], common_conf['influx']['port'], common_conf['influx']['user'], common_conf['influx']['password_file'], common_conf['influx']['database'], common_conf['influx'].get('verify_ssl'))
-            influxdb.push_run_stats(common_conf['files']['run_state'])
-            influxdb.push_cleanup_stats(common_conf['files']['cleanup_state'])
-            print(f"SUCCESS: Backup stats sent to {common_conf['influx']['host']}")
-        except (OSError, FileNotFoundError, ConnectionError) as e:
-            print(f"ERROR: Connection to influx server failed: {e}")
-            log.error(f"ERROR: Connection to influx server failed: {e}")
-            sys.exit(int(Nagios.WARNING))
+            metric_server = MetricServer(common_conf.get('metric_server'))
+            metric_server.push_run_metrics(common_conf['file']['run_state'])
+            #metric_server.push_cleanup_metrics(common_conf['file']['cleanup_state'])
+            #metric_server.push_validate_metrics(common_conf['file']['validate_state'])
+            msg = f"SUCCESS: Metrics pushed to {metric_server.host}:{metric_server.port} ({metric_server.type})"
+        except (EnvironmentError, FileNotFoundError, ConnectionError) as e:
+            msg = f"ERROR: Initializing metric server failed: {e}"
+            log.error(msg)
+            exit_code = int(Nagios.CRITICAL)
+        except HTTPError as e:
+            msg = f"ERROR: Pushing metrics failed: {e}"
+            log.error(msg)
+            exit_code = int(Nagios.CRITICAL)
+            
+        print(msg)
+        sys.exit(exit_code)
     else:
         if args.action == Action.CLEANUP.value:
-            state = CleanupState(common_conf['files']['cleanup_state'])
+            state = CleanupState(common_conf['file']['cleanup_state'])
             nagios_service = common_conf['nagios']['cleanup_service']
         elif args.action == Action.VALIDATE.value:
-            state = ValidateState(common_conf['files']['validate_state'])
+            state = ValidateState(common_conf['file']['validate_state'])
             nagios_service = common_conf['nagios']['validate_service']
         else:
-            state = RunState(common_conf['files']['run_state'])
+            state = RunState(common_conf['file']['run_state'])
             nagios_service = common_conf['nagios']['run_service']
         
         nagios = NagiosServer(common_conf['nagios']['host'], common_conf['nagios']['port'], common_conf['nagios']['host_service'], nagios_service)
@@ -1268,38 +1416,40 @@ if __name__ == "__main__":
                 if not target_conf: 
                     raise TargetError(f"Target not defined in '{args.conf}' config file")
                 
-                if target_conf.get('type') == BackupType.PUSH.value:
-                    target = PushTarget(target, target_conf, conf.get('default'), common_conf['dirs']['backups'], common_conf['dirs']['scripts'], common_conf['dirs']['work'], getattr(args, "skip_frequency", False))
-                elif target_conf.get('type') == BackupType.PULL.value:
-                    target = PullTarget(target, target_conf, conf.get('default'), common_conf['dirs']['backups'], common_conf['dirs']['scripts'], getattr(args, "stats_file", None))
+                backup_type = target_conf.get('type')
+                
+                if backup_type == BackupType.PUSH.value:
+                    target = PushTarget(target, target_conf, conf.get('default'), common_conf['dir']['backup'], common_conf['dir']['script'], common_conf['dir']['work'], getattr(args, "skip_frequency", False))
+                elif backup_type == BackupType.PULL.value:
+                    target = PullTarget(target, target_conf, conf.get('default'), common_conf['dir']['backup'], common_conf['dir']['script'], getattr(args, "stats_file", None))
                 else:
-                    raise TargetError(f"Type '{target_conf.get('type')}' is not valid option. Valid options are: [{BackupType.PUSH.value}, {BackupType.PULL.value}]")
+                    raise TargetError(f"Type '{backup_type}' is not valid option. Valid options are: {Defaults.list(BackupType)}")
                 
                 log.info(f'[{args.action.upper()}] Start processing target')
 
                 if args.action == Action.RUN.value:
                     target.create_backup()
-                    state.set_target_status(target, f'({get_display_size(target.backup.size)}) {target.backup.package}', Nagios.OK, target.elapsed_time_copy, target.elapsed_time_pack, target.transfer_speed_copy, target.transfer_speed_pack)
+                    state.set_target_status(target, backup_type, f'({get_display_size(target.backup.size)}) {target.backup.package}', Nagios.OK, target.elapsed_time_copy, target.elapsed_time_pack, target.transfer_speed_copy, target.transfer_speed_pack)
                     
                 elif args.action == Action.CLEANUP.value:                
                     if target.get_backups_num() == 0: 
-                        state.set_target_status(target, 'Not found any backup', Nagios.WARNING, 0, 0, 0, target.max_size, target.max_num)
+                        state.set_target_status(target, backup_type, 'Not found any backup', Nagios.WARNING, 0, 0, 0, target.max_size, target.max_num)
                     else:
                         msg, total_recovered_space, total_removed_backups, total_size, total_num = target.cleanup()
-                        state.set_target_status(target, msg, Nagios.OK, total_recovered_space, total_removed_backups, total_size, total_num, target.max_size, target.max_num)
+                        state.set_target_status(target, backup_type, msg, Nagios.OK, total_recovered_space, total_removed_backups, total_size, total_num, target.max_size, target.max_num)
                         
                 elif args.action == Action.VALIDATE.value:
                     invalid_backups, avg_size = target.validate()
                     if len(invalid_backups) > 0:
-                        state.set_target_status(target, invalid_backups, Nagios.WARNING, avg_size)
+                        state.set_target_status(target, backup_type, invalid_backups, Nagios.WARNING, avg_size)
                     else:
-                        state.set_target_status(target, [], Nagios.OK, avg_size)
+                        state.set_target_status(target, backup_type, [], Nagios.OK, avg_size)
                         
                 else:
-                    raise TargetError(f"Action '{args.action}' is not valid option. Valid options are: [{Action.RUN.value}, {Action.CLEANUP.value}, {Action.VALIDATE.value}]")
+                    raise TargetError(f"Action '{args.action}' is not valid option. Valid options are: {Defaults.list(Action)}")
             except catch_exception_class as e:
                 code = e.code if hasattr(e, 'code') else Nagios.CRITICAL
-                state.set_target_status(target, str(e), code)
+                state.set_target_status(target, backup_type, str(e), code)
 
         if not args.no_report:
             nagios.send_report_to_nagios(getattr(Nagios, str(state.get_most_failure_status())), state.get_summary())
