@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 
-# Karol Siedlaczek 2023-2025
+# Karol Siedlaczek 2022-2025
 
 import re
 import os
