@@ -1286,13 +1286,13 @@ class CleanupState(State):
     def __init__(self, state_file) -> None:
         super().__init__(state_file)
     
-    def update(self, target_name: str, code: int, backup_type: str, backup_format: str, msg: str, recovered_bytes: int=None, removed_backups: int=None, total_size: int=None, total_num: int=None, max_size: int=None, max_num: int=None) -> None:
+    def update(self, target_name: str, code: int, backup_type: str, backup_format: str, msg: str, recovered_data: int=None, removed_backups: int=None, total_size: int=None, total_num: int=None, max_size: int=None, max_num: int=None) -> None:
         new_state = self.state
         new_state[target_name] = {
             **self.get_default_target_state_fields(code, backup_type, backup_format, msg),
             'recovered_data': {
-                'bytes': recovered_bytes,
-                'display': get_display_size(recovered_bytes) if recovered_bytes else None
+                'bytes': recovered_data,
+                'display': get_display_size(recovered_data) if recovered_data else None
             },
             'removed_backups': removed_backups,
             'total_size': {
