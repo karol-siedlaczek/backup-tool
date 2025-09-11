@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+#!/usr/bin/env python3.10
 
 # Karol Siedlaczek 2022-2025
 
@@ -44,7 +44,7 @@ class Defaults(Enum):
 class RequiredCommonParams(Defaults):
     NAGIOS = ['host', 'port', 'host_service', 'run_service', 'cleanup_service', 'validation_service', 'push_metrics_service']
     LOG_FILE = []
-    DIR = ['backup', 'work', 'script', 'state']
+    PATH = ['backup', 'work', 'script', 'state']
     
     @staticmethod
     def validate(common_conf) -> None:
@@ -56,10 +56,11 @@ class RequiredCommonParams(Defaults):
             parent_attr = common_conf.get(str(parent_param))
             if not parent_attr:
                 missing_required_params.append(f' - common.{parent_param}')
-            for child_param in parent_param.value:
-                child_attr = parent_attr.get(str(child_param))
-                if not child_attr:
-                    missing_required_params.append(f' - common.{parent_param}.{child_param}')
+            else:
+                for child_param in parent_param.value:
+                    child_attr = parent_attr.get(str(child_param))
+                    if not child_attr:
+                        missing_required_params.append(f' - common.{parent_param}.{child_param}')
         if len(missing_required_params) > 0:
             raise EnvironmentError('\n'.join(missing_required_params))
 
@@ -80,7 +81,7 @@ class Action(Defaults):
     VALIDATE = 'validate'
     CONF_CHECK = 'conf-check'
     
-class MetricServerType(Defaults):
+class MetricServerProvider(Defaults):
     INFLUX = 'influx'
     VICTORIA_METRICS = 'victoria-metrics'
 
@@ -123,7 +124,7 @@ class TargetCleanupError(TargetException):
         super().__init__(Nagios.CRITICAL, msg)
 
 class MetricServer():
-    __slots__ = ['host', 'port', 'type', 'influx_client', 'auth', 'url', 'measurement_name', 'run_metrics_file', 'cleanup_metrics_file', "validation_metrics_file"]
+    __slots__ = ['host', 'port', 'provider', 'influx_client', 'auth', 'url', 'measurement_name', 'run_metrics_file', 'cleanup_metrics_file', "validation_metrics_file"]
     
     def __init__(self, conf: dict, metrics_base_path: str):
         packages.urllib3.disable_warnings()
@@ -148,8 +149,8 @@ class MetricServer():
             else:
                 password = None
             
-            metric_server_type = conf.get('type')
-            Validator.validate_allowed_values('common.metric_server.type', metric_server_type, Defaults.list(MetricServerType))
+            provider = conf.get('provider')
+            Validator.validate_allowed_values('common.metric_server.provider', provider, Defaults.list(MetricServerProvider))
         
             host = conf.get('host')
             port = conf.get('port')
@@ -159,9 +160,9 @@ class MetricServer():
             Validator.validate_port('common.metric_server.port', port)
             self.host = host
             self.port = port
-            self.type = metric_server_type
+            self.provider = provider
             
-            if metric_server_type == MetricServerType.INFLUX.value:
+            if provider == MetricServerProvider.INFLUX.value:
                 Validator.validate_required_param('common.metric_server.user', user)
                 database = conf.get('database')
                 ssl = conf.get('ssl')
@@ -184,7 +185,7 @@ class MetricServer():
                     verify_ssl=verify_ssl
                 )
                 self.influx_client.ping()
-            elif metric_server_type == MetricServerType.VICTORIA_METRICS.value:
+            elif provider == MetricServerProvider.VICTORIA_METRICS.value:
                 self.auth = (user, password) if password else None
                 self.url = f"http://{self.host}:{self.port}/write"
         except TargetError as e:
@@ -195,9 +196,9 @@ class MetricServer():
         with open(self.run_metrics_file, "r") as f:
             stats = yaml.safe_load(f)
             
-        if self.type == MetricServerType.INFLUX.value:
+        if self.provider == MetricServerProvider.INFLUX.value:
             self.__push_run_metrics_to_influx(stats)
-        elif self.type == MetricServerType.VICTORIA_METRICS.value:
+        elif self.provider == MetricServerProvider.VICTORIA_METRICS.value:
             self.__push_run_metrics_to_victoria_metrics(stats)
         log.debug(f'Run metrics pushed to {self.host}:{self.port}')
     
@@ -245,9 +246,9 @@ class MetricServer():
         with open(self.cleanup_metrics_file, "r") as f:
             stats = yaml.safe_load(f)
             
-        if self.type == MetricServerType.INFLUX.value:
+        if self.provider == MetricServerProvider.INFLUX.value:
             self.__push_cleanup_metrics_to_influx(stats)
-        elif self.type == MetricServerType.VICTORIA_METRICS.value:
+        elif self.provider == MetricServerProvider.VICTORIA_METRICS.value:
             self.__push_cleanup_metrics_to_victoria_metrics(stats)
         log.debug(f'Cleanup metrics pushed to {self.host}:{self.port}')
     
@@ -293,9 +294,9 @@ class MetricServer():
         with open(self.validation_metrics_file, "r") as f:
             stats = yaml.safe_load(f)
             
-        if self.type == MetricServerType.INFLUX.value:
+        if self.provider == MetricServerProvider.INFLUX.value:
             self.__push_validation_metrics_to_influx(stats)
-        elif self.type == MetricServerType.VICTORIA_METRICS.value:
+        elif self.provider == MetricServerProvider.VICTORIA_METRICS.value:
             self.__push_validation_metrics_to_victoria_metrics(stats)
         log.debug(f'Validation metrics pushed to {self.host}:{self.port}')
     
@@ -1507,20 +1508,20 @@ if __name__ == "__main__":
     catch_exception_class = TargetException if args.verbose > 1 else Exception
     target = '-'
     
-    for _, path in common_conf['dir'].items():
+    for _, path in common_conf['path'].items():
         os.makedirs(path, exist_ok=True)       
     
     if args.action == Action.CLEANUP.value:
-        state = CleanupState(f"{common_conf['dir']['state']}/cleanup-state.yaml")
+        state = CleanupState(f"{common_conf['path']['state']}/cleanup-state.yaml")
         nagios_service = common_conf['nagios']['cleanup_service']
     elif args.action == Action.VALIDATE.value:
-        state = ValidateState(f"{common_conf['dir']['state']}/validation-state.yaml")
+        state = ValidateState(f"{common_conf['path']['state']}/validation-state.yaml")
         nagios_service = common_conf['nagios']['validation_service']
     elif args.action == Action.RUN.value:
-        state = RunState(f"{common_conf['dir']['state']}/run-state.yaml")
+        state = RunState(f"{common_conf['path']['state']}/run-state.yaml")
         nagios_service = common_conf['nagios']['run_service']
     elif args.action == Action.PUSH_METRICS.value:
-        state = PushMetricsState(f"{common_conf['dir']['state']}/push-metrics-state.yaml")
+        state = PushMetricsState(f"{common_conf['path']['state']}/push-metrics-state.yaml")
         nagios_service = common_conf['nagios']['push_metrics_service']
     
     nagios = NagiosServer(common_conf['nagios']['host'], common_conf['nagios']['port'], common_conf['nagios']['host_service'], nagios_service)
@@ -1529,20 +1530,20 @@ if __name__ == "__main__":
         metric_server = None
         
         try:
-            metric_server = MetricServer(common_conf.get('metric_server'), common_conf['dir']['state'])
+            metric_server = MetricServer(common_conf.get('metric_server'), common_conf['path']['state'])
         except (EnvironmentError, FileNotFoundError) as e:
-            state.update(common_conf.get('metric_server', {}).get('type', 'unknown'), int(Nagios.WARNING), f"Initializing metric server failed with error: {e}")
+            state.update(common_conf.get('metric_server', {}).get('provider', 'unknown'), int(Nagios.WARNING), f"Initializing metric server failed with error: {e}")
         
         if metric_server:    
             try:
                 metric_server.push_run_metrics()
                 metric_server.push_cleanup_metrics()
                 metric_server.push_validation_metrics()
-                state.update(metric_server.type, int(Nagios.OK), f"All metrics successfully pushed to {metric_server.host}:{metric_server.port} ({metric_server.type})")
+                state.update(metric_server.provider, int(Nagios.OK), f"All metrics successfully pushed to {metric_server.host}:{metric_server.port} ({metric_server.provider})")
             except (HTTPError, ConnectionError) as e:
-                state.update(metric_server.type, int(Nagios.WARNING), f"Pushing metrics failed with error: {e}")
+                state.update(metric_server.provider, int(Nagios.WARNING), f"Pushing metrics failed with error: {e}")
             except (AttributeError, FileNotFoundError) as e:
-                state.update(metric_server.type, int(Nagios.WARNING), f"Unable to read source file with metrics: {e}")
+                state.update(metric_server.provider, int(Nagios.WARNING), f"Unable to read source file with metrics: {e}")
     else:     
         if 'all' in args.targets:
             args.targets = list(conf.get('targets'))
@@ -1554,9 +1555,9 @@ if __name__ == "__main__":
                     raise TargetError("Target not defined in config file")
                 
                 if target_conf.get('type') == BackupType.PUSH.value:
-                    target = PushTarget(target, target_conf, conf.get('default'), common_conf['dir']['backup'], common_conf['dir']['script'], common_conf['dir']['work'], getattr(args, "skip_frequency", False))
+                    target = PushTarget(target, target_conf, conf.get('default'), common_conf['path']['backup'], common_conf['path']['script'], common_conf['path']['work'], getattr(args, "skip_frequency", False))
                 elif target_conf.get('type') == BackupType.PULL.value:
-                    target = PullTarget(target, target_conf, conf.get('default'), common_conf['dir']['backup'], common_conf['dir']['script'], getattr(args, "stats_file", None))
+                    target = PullTarget(target, target_conf, conf.get('default'), common_conf['path']['backup'], common_conf['path']['script'], getattr(args, "stats_file", None))
                 else:
                     raise TargetError(f"Type '{target_conf.get('type')}' is not valid option. Valid options are: {Defaults.list(BackupType)}")
                 
