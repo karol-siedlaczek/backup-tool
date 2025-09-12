@@ -9,6 +9,7 @@ import pwd
 import grp
 import yaml
 import math
+import time
 import argparse
 from typing import Tuple
 from requests import packages, post
@@ -1480,6 +1481,8 @@ def get_logger(log_file: str, verbose_level: int) -> None:
     return logging.getLogger('backup-tool')
 
 def run_cmd(cmd: str, check: bool=True) -> str:
+    # TODO - Add here proper stats for elapsed seconds
+    # start = time.perf_counter()
     process = subprocess.run(
         cmd, 
         shell=True, 
@@ -1490,6 +1493,8 @@ def run_cmd(cmd: str, check: bool=True) -> str:
         text=True, 
         executable="/bin/bash"
     )
+    #end = time.perf_counter()
+    #elapsed = end - start
     return process.stdout or process.stderr
 
 if __name__ == "__main__":
