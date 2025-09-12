@@ -212,6 +212,7 @@ class MetricServer():
                 'tags': self.__get_influx_tags(target, 'run', stat),
                 'fields': {
                     **self.__get_influx_default_fields(stat),
+                    'last_success_backup_timestamp': stat.get('last_success_backup_timestamp', {}).get('unix'),
                     'backup_size_bytes': stat.get('backup_size', {}).get('bytes'),
                     'copy_duration_sec': copy_stat.get('seconds'),
                     'pack_duration_sec': pack_stat.get('seconds'),
@@ -229,6 +230,7 @@ class MetricServer():
             tags = self.__get_victoria_metrics_tags(target, 'run', stat)
             fields = self.__get_victoria_metrics_default_fields(stat)
             self.__add_field(fields, 'backup_size_bytes', stat.get('backup_size', {}).get('bytes'))
+            self.__add_field(fields, 'last_success_backup_timestamp', stat.get('last_success_backup_timestamp', {}).get('unix'))
             self.__add_field(fields, 'copy_duration_sec', copy_stat.get('seconds'))
             self.__add_field(fields, 'pack_duration_sec', pack_stat.get('seconds'))
             self.__add_field(fields, 'copy_bytes_per_sec', copy_stat.get('bytes_per_second'))
@@ -338,8 +340,7 @@ class MetricServer():
     def __get_influx_default_fields(self, stat: dict) -> dict: 
         return {
             'msg': stat.get('msg'),
-            'str_timestamp': stat.get('timestamp', {}).get('display'),
-            'timestamp_unix': stat.get('timestamp', {}).get('unix'),
+            'action_timestamp': stat.get('timestamp', {}).get('unix'),
             'status_code': stat.get('status', {}).get('code')
         }
 
@@ -347,7 +348,7 @@ class MetricServer():
         fields = []
         # TODO - VictoriaMetrics does not accept string, maybe VictoriaLogs should be used instead?
         #self.add_field(fields, 'msg', stat.get("msg"))
-        self.__add_field(fields, 'timestamp_unix', stat.get('timestamp', {}).get('unix'))
+        self.__add_field(fields, 'action_timestamp', stat.get('timestamp', {}).get('unix'))
         self.__add_field(fields, 'status_code', stat.get('status', {}).get('code'))
         return fields
     
@@ -1227,7 +1228,7 @@ class State():
         now = datetime.now()
         return {
             'timestamp': {
-                'unix': int(now.timestamp()),
+                'unix': int(now.timestamp() * 1000),
                 'display': now.strftime("%Y-%m-%d %H:%M:%S")
             },
             'status': {
@@ -1269,10 +1270,14 @@ class RunState(State):
     def __init__(self, state_file) -> None:
         super().__init__(state_file)
     
-    def update(self, target_name: str, code: int, backup_type: str, backup_format: str, msg: str, size: int=None, copy_duration_sec: int=None, pack_duration_sec: int=None, copy_bytes_per_sec: int=None, pack_bytes_per_sec: int=None) -> None:
+    def update(self, target_name: str, code: int, backup_type: str, backup_format: str, msg: str, last_success_backup_date: datetime = None, size: int=None, copy_duration_sec: int=None, pack_duration_sec: int=None, copy_bytes_per_sec: int=None, pack_bytes_per_sec: int=None) -> None:
         new_state = self.state
         new_state[target_name] = {
             **self.get_default_target_state_fields(code, backup_type, backup_format, msg),
+            'last_success_backup_timestamp': {
+                'unix': int(last_success_backup_date.timestamp() * 1000) if last_success_backup_date else None,
+                'display': last_success_backup_date.strftime("%Y-%m-%d %H:%M:%S") if last_success_backup_date else None
+            },
             'backup_size': {
                 'bytes': size,
                 'display': get_display_size(size) if size else 0
@@ -1578,12 +1583,13 @@ if __name__ == "__main__":
                         int(Nagios.OK), 
                         target.type, 
                         target.format, 
+                        backup.date,
                         f'({get_display_size(backup.size)}) {backup.file}', 
                         backup.size, 
                         backup.copy_duration_sec, 
                         backup.pack_duration_sec, 
                         backup.copy_bytes_per_sec, 
-                        backup.pack_bytes_per_sec
+                        backup.pack_bytes_per_sec,
                     )
                 elif args.action == Action.CLEANUP.value:                
                     if target.get_backups_num() == 0:
@@ -1643,7 +1649,11 @@ if __name__ == "__main__":
                     raise TargetError(f"Action '{args.action}' is not valid option. Valid options are: {Defaults.list(Action)}")
             except catch_exception_class as e:
                 code = e.code if hasattr(e, 'code') else Nagios.CRITICAL
-                state.update(target.name, int(code), target.type, target.format, str(e))
+                if args.action == Action.RUN.value:
+                    latest_backup = target.get_latest_backup()
+                    state.update(target.name, int(code), target.type, target.format, str(e), latest_backup.date if latest_backup else None)
+                else:
+                    state.update(target.name, int(code), target.type, target.format, str(e))
 
     if not args.no_report:
         nagios.send_report_to_nagios(state.get_most_failure_status()['code'], state.get_summary(args.action))
