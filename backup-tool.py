@@ -1240,7 +1240,7 @@ class State():
             'msg': f'{msg[:State.MAX_MSG]}... ({len(msg) - State.MAX_MSG} log lines truncated)' if len(msg) > State.MAX_MSG else msg
         }
     
-    def get_summary(self) -> str:
+    def get_summary(self, action: str) -> str:
         summary = ''
         
         for target, target_state in self.state.items():
@@ -1253,7 +1253,16 @@ class State():
                 summary += f"{status_display}: [{target}] {msg} ({timestamp})</br>"
         
         if summary == '':
-            return "OK: All backups successful" 
+            if args.action == Action.RUN.value:
+                return "OK: All backups successful"  
+            elif args.action == Action.CLEANUP.value:
+                return "OK: All cleanups successful"
+            elif args.action == Action.PUSH_METRICS.value:
+                return "OK: All metrics pushed successfully"
+            elif args.action == Action.VALIDATE.value:
+                return "OK: All validations passed"
+            else:
+                return "OK"
         else:
             return summary[:-5]
 
@@ -1638,7 +1647,7 @@ if __name__ == "__main__":
                 state.update(target.name, int(code), target.type, target.format, str(e))
 
     if not args.no_report:
-        nagios.send_report_to_nagios(state.get_most_failure_status()['code'], state.get_summary())
+        nagios.send_report_to_nagios(state.get_most_failure_status()['code'], state.get_summary(args.action))
     
     if args.action != Action.PUSH_METRICS.value:
         state.remove_undefined_targets(list(conf["targets"]))
