@@ -211,9 +211,7 @@ class MetricServer():
                 'measurement': self.measurement_name,
                 'tags': self.__get_influx_tags(target, 'run', stat),
                 'fields': {
-                    'msg': stat.get('msg'),
-                    'str_timestamp': stat.get('timestamp', {}).get('display'),
-                    'timestamp_unix': stat.get('timestamp', {}).get('unix'),
+                    **self.__get_influx_default_fields(stat),
                     'backup_size_bytes': stat.get('backup_size', {}).get('bytes'),
                     'copy_duration_sec': copy_stat.get('seconds'),
                     'pack_duration_sec': pack_stat.get('seconds'),
@@ -226,18 +224,15 @@ class MetricServer():
     def __push_run_metrics_to_victoria_metrics(self, stats) -> None:
         metrics = []
         for target, stat in stats.items():
-            copy_stat = stat.get('processing').get('copy')
-            pack_stat = stat.get('processing').get('pack')
+            copy_stat = stat.get('processing', {}).get('copy', {})
+            pack_stat = stat.get('processing', {}).get('pack', {})
             tags = self.__get_victoria_metrics_tags(target, 'run', stat)
-            fields = []
-            # TODO - VictoriaMetrics does not accept string, maybe VictoriaLogs should be used instead?
-            #self.add_field(fields, 'msg', stat.get("msg"))
-            self.add_field(fields, 'timestamp_unix', stat.get('timestamp', {}).get('unix'))
-            self.add_field(fields, 'backup_size_bytes', stat.get('backup_size', {}).get('bytes'))
-            self.add_field(fields, 'copy_duration_sec', copy_stat.get('seconds'))
-            self.add_field(fields, 'pack_duration_sec', pack_stat.get('seconds'))
-            self.add_field(fields, 'copy_bytes_per_sec', copy_stat.get('bytes_per_second'))
-            self.add_field(fields, 'pack_bytes_per_sec', pack_stat.get('bytes_per_second'))
+            fields = self.__get_victoria_metrics_default_fields(stat)
+            self.__add_field(fields, 'backup_size_bytes', stat.get('backup_size', {}).get('bytes'))
+            self.__add_field(fields, 'copy_duration_sec', copy_stat.get('seconds'))
+            self.__add_field(fields, 'pack_duration_sec', pack_stat.get('seconds'))
+            self.__add_field(fields, 'copy_bytes_per_sec', copy_stat.get('bytes_per_second'))
+            self.__add_field(fields, 'pack_bytes_per_sec', pack_stat.get('bytes_per_second'))
             metrics.append(f"{self.measurement_name},{tags} {','.join(fields)}")
         self.__write_to_victoria_metrics(metrics)
     
@@ -259,9 +254,7 @@ class MetricServer():
                 'measurement': self.measurement_name,
                 'tags': self.__get_influx_tags(target, 'cleanup', stat),
                 'fields': {
-                    'msg': stat.get('msg'),
-                    'str_timestamp': stat.get('timestamp', {}).get('display'),
-                    'timestamp_unix': stat.get('timestamp', {}).get('unix'),
+                    **self.__get_influx_default_fields(stat),
                     'recovered_bytes': stat.get('recovered_data', {}).get('bytes'),
                     'removed_backups': stat.get('removed_backups'),
                     'total_num': stat.get('total_num'),
@@ -276,16 +269,13 @@ class MetricServer():
         metrics = []
         for target, stat in stats.items():
             tags = self.__get_victoria_metrics_tags(target, 'cleanup', stat)
-            fields = []
-            # TODO - VictoriaMetrics does not accept string, maybe VictoriaLogs should be used instead?
-            #self.add_field(fields, 'msg', stat.get("msg"))
-            self.add_field(fields, 'timestamp_unix', stat.get('timestamp', {}).get('unix'))
-            self.add_field(fields, 'recovered_bytes', stat.get('recovered_data', {}).get('bytes'))
-            self.add_field(fields, 'removed_backups', stat.get('removed_backups'))
-            self.add_field(fields, 'total_num', stat.get('total_num'))
-            self.add_field(fields, 'total_size_bytes', stat.get('total_size', {}).get('bytes'))
-            self.add_field(fields, 'max_num', stat.get('max_num'))
-            self.add_field(fields, 'max_size_bytes', stat.get('max_size', {}).get('bytes', None))
+            fields = self.__get_victoria_metrics_default_fields(stat)
+            self.__add_field(fields, 'recovered_bytes', stat.get('recovered_data', {}).get('bytes'))
+            self.__add_field(fields, 'removed_backups', stat.get('removed_backups'))
+            self.__add_field(fields, 'total_num', stat.get('total_num'))
+            self.__add_field(fields, 'total_size_bytes', stat.get('total_size', {}).get('bytes'))
+            self.__add_field(fields, 'max_num', stat.get('max_num'))
+            self.__add_field(fields, 'max_size_bytes', stat.get('max_size', {}).get('bytes', None))
             metrics.append(f"{self.measurement_name},{tags} {','.join(fields)}")
         self.__write_to_victoria_metrics(metrics)
     
@@ -307,9 +297,7 @@ class MetricServer():
                 'measurement': self.measurement_name,
                 'tags': self.__get_influx_tags(target, 'validation', stat),
                 'fields': {
-                    'msg': stat.get('msg'),
-                    'str_timestamp': stat.get('timestamp', {}).get('display'),
-                    'timestamp_unix': stat.get('timestamp', {}).get('unix'),
+                    **self.__get_influx_default_fields(stat),
                     'avg_size_bytes': stat.get('avg_size', {}).get('bytes'),
                     'invalid_backups_num': stat.get('invalid_backups_num'),
                     'recent_invalid_streak': stat.get('recent_invalid_streak')
@@ -321,21 +309,17 @@ class MetricServer():
         metrics = []
         for target, stat in stats.items():
             tags = self.__get_victoria_metrics_tags(target, 'validation', stat)
-            fields = []
-            # TODO - VictoriaMetrics does not accept string, maybe VictoriaLogs should be used instead?
-            #self.add_field(fields, 'msg', stat.get("msg"))
-            self.add_field(fields, 'timestamp_unix', stat.get('timestamp', {}).get('unix'))
-            self.add_field(fields, 'avg_size_bytes', stat.get('avg_size', {}).get('bytes'))
-            self.add_field(fields, 'invalid_backups_num', stat.get('invalid_backups_num'))
-            self.add_field(fields, 'recent_invalid_streak', stat.get('recent_invalid_streak'))
+            fields = self.__get_victoria_metrics_default_fields(stat)
+            self.__add_field(fields, 'avg_size_bytes', stat.get('avg_size', {}).get('bytes'))
+            self.__add_field(fields, 'invalid_backups_num', stat.get('invalid_backups_num'))
+            self.__add_field(fields, 'recent_invalid_streak', stat.get('recent_invalid_streak'))
             metrics.append(f"{self.measurement_name},{tags} {','.join(fields)}")
         self.__write_to_victoria_metrics(metrics)
     
     def __get_influx_tags(self, target: str, action: str, stat: dict) -> dict:
         return {
             'target': target,
-            'status': stat.get('status').get('display'),
-            'code': stat.get('status').get('code'),
+            'status': stat.get('status', {}).get('display'),
             'action': action,
             'type': stat.get('type'),
             'format': stat.get('format')
@@ -344,15 +328,30 @@ class MetricServer():
     def __get_victoria_metrics_tags(self, target: str, action: str, stat: dict) -> str:
         tags = [
             f'target={target}',
-            f'status={stat.get("status").get("display")}',
-            f'code={stat.get("status").get("code")}',
+            f'status={stat.get("status", {}).get("display")}',
             f'action={action}',
             f'type={stat.get("type")}',
             f'format={stat.get("format")}'
         ]
         return ','.join(tags)
     
-    def add_field(self, fields: list, key: str, value) -> None:
+    def __get_influx_default_fields(self, stat: dict) -> dict: 
+        return {
+            'msg': stat.get('msg'),
+            'str_timestamp': stat.get('timestamp', {}).get('display'),
+            'timestamp_unix': stat.get('timestamp', {}).get('unix'),
+            'status_code': stat.get('status', {}).get('code')
+        }
+
+    def __get_victoria_metrics_default_fields(self, stat: dict) -> list:
+        fields = []
+        # TODO - VictoriaMetrics does not accept string, maybe VictoriaLogs should be used instead?
+        #self.add_field(fields, 'msg', stat.get("msg"))
+        self.__add_field(fields, 'timestamp_unix', stat.get('timestamp', {}).get('unix'))
+        self.__add_field(fields, 'status_code', stat.get('status', {}).get('code'))
+        return fields
+    
+    def __add_field(self, fields: list, key: str, value) -> None:
         if value is not None:
             fields.append(f"{key}={value}i")
     
