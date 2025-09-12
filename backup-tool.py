@@ -1267,7 +1267,7 @@ class RunState(State):
             **self.get_default_target_state_fields(code, backup_type, backup_format, msg),
             'backup_size': {
                 'bytes': size,
-                'display': get_display_size(size) if size else None
+                'display': get_display_size(size) if size else 0
             },
             'processing': {
                 'copy': {
@@ -1293,17 +1293,17 @@ class CleanupState(State):
             **self.get_default_target_state_fields(code, backup_type, backup_format, msg),
             'recovered_data': {
                 'bytes': recovered_data,
-                'display': get_display_size(recovered_data) if recovered_data else None
+                'display': get_display_size(recovered_data) if recovered_data else 0
             },
             'removed_backups': removed_backups,
             'total_size': {
                 'bytes': total_size,
-                'display': get_display_size(total_size) if total_size else None
+                'display': get_display_size(total_size) if total_size else 0
             },
             'total_num': total_num,
             'max_size': {
                 'bytes': max_size,
-                'display': get_display_size(max_size) if max_size else None
+                'display': get_display_size(max_size) if max_size else 0
             },
             'max_num': max_num,
         }
@@ -1325,7 +1325,7 @@ class ValidateState(State):
             **self.get_default_target_state_fields(code, backup_type, backup_format, msg),
             'avg_size': {
                 'bytes': avg_size,
-                'display': get_display_size(avg_size) if avg_size else None
+                'display': get_display_size(avg_size) if avg_size else 0
             },
             'recent_invalid_streak': recent_invalid_streak,
             'invalid_backups_num': len(invalid_backups),
