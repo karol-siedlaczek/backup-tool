@@ -1565,9 +1565,6 @@ if __name__ == "__main__":
 
                 if args.action == Action.RUN.value:
                     backup = target.create_backup()
-                    print(backup)
-                    print(backup.copy_bytes_per_sec)
-                    print(backup.copy_duration_sec)
                     state.update(
                         target.name, 
                         int(Nagios.OK), 
