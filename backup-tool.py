@@ -28,8 +28,6 @@ class Defaults(Enum):
     def list(enum_class=None) -> list:
         class_name = enum_class or Defaults
         return [member.value for member in class_name]
-        #class_name = enum_class or Defaults
-        #return [ name.lower() for name, member in class_name.__members__.items() ]
     
     def __str__(self) -> str:
         return self.name.lower() if isinstance(self.name, str) else self.name
@@ -85,6 +83,12 @@ class Action(Defaults):
 class MetricServerProvider(Defaults):
     INFLUX = 'influx'
     VICTORIA_METRICS = 'victoria-metrics'
+    
+class StateFiles(Defaults):
+    RUN = 'run-state.yaml'
+    VALIDATION = 'validation-state.yaml'
+    CLEANUP = 'cleanup-state.yaml'
+    PUSH_METRICS = 'push-metrics-state.yaml'
 
 class Nagios(str, Enum):
     OK = 0
@@ -133,9 +137,9 @@ class MetricServer():
             raise EnvironmentError(f"Not found configuration in config file for metric server, section 'common.metric_server' need to be defined")
         
         self.measurement_name = 'backup_tool'
-        self.run_metrics_file = f'{metrics_base_path}/run-state.yaml'
-        self.cleanup_metrics_file = f'{metrics_base_path}/cleanup-state.yaml'
-        self.validation_metrics_file = f'{metrics_base_path}/validation-state.yaml'
+        self.run_metrics_file = f'{metrics_base_path}/{StateFiles.RUN.value}'
+        self.cleanup_metrics_file = f'{metrics_base_path}/{StateFiles.CLEANUP.value}'
+        self.validation_metrics_file = f'{metrics_base_path}/{StateFiles.VALIDATION.value}'
         
         try:
             password_file = conf.get('password_file')
@@ -213,7 +217,7 @@ class MetricServer():
                 'tags': self.__get_influx_tags(target, 'run', stat),
                 'fields': {
                     **self.__get_influx_default_fields(stat),
-                    'last_success_backup_timestamp': stat.get('last_success_backup_timestamp', {}).get('unix'),
+                    'last_success_backup_timestamp': stat.get('last_success_backup_timestamp', {}).get('milliseconds'),
                     'backup_size_bytes': stat.get('backup_size', {}).get('bytes'),
                     'copy_duration_sec': copy_stat.get('seconds'),
                     'pack_duration_sec': pack_stat.get('seconds'),
@@ -231,7 +235,7 @@ class MetricServer():
             tags = self.__get_victoria_metrics_tags(target, 'run', stat)
             fields = self.__get_victoria_metrics_default_fields(stat)
             self.__add_field(fields, 'backup_size_bytes', stat.get('backup_size', {}).get('bytes'))
-            self.__add_field(fields, 'last_success_backup_timestamp', stat.get('last_success_backup_timestamp', {}).get('unix'))
+            self.__add_field(fields, 'last_success_backup_timestamp', stat.get('last_success_backup_timestamp', {}).get('milliseconds'))
             self.__add_field(fields, 'copy_duration_sec', copy_stat.get('seconds'))
             self.__add_field(fields, 'pack_duration_sec', pack_stat.get('seconds'))
             self.__add_field(fields, 'copy_bytes_per_sec', copy_stat.get('bytes_per_second'))
@@ -341,7 +345,7 @@ class MetricServer():
     def __get_influx_default_fields(self, stat: dict) -> dict: 
         return {
             'msg': stat.get('msg'),
-            'action_timestamp': stat.get('timestamp', {}).get('unix'),
+            'action_timestamp': stat.get('timestamp', {}).get('milliseconds'),
             'status_code': stat.get('status', {}).get('code')
         }
 
@@ -349,7 +353,7 @@ class MetricServer():
         fields = []
         # TODO - VictoriaMetrics does not accept string, maybe VictoriaLogs should be used instead?
         #self.add_field(fields, 'msg', stat.get("msg"))
-        self.__add_field(fields, 'action_timestamp', stat.get('timestamp', {}).get('unix'))
+        self.__add_field(fields, 'action_timestamp', stat.get('timestamp', {}).get('milliseconds'))
         self.__add_field(fields, 'status_code', stat.get('status', {}).get('code'))
         return fields
     
@@ -1229,7 +1233,7 @@ class State():
         now = datetime.now()
         return {
             'timestamp': {
-                'unix': int(now.timestamp() * 1000),
+                'milliseconds': int(now.timestamp() * 1000),
                 'display': now.strftime("%Y-%m-%d %H:%M:%S")
             },
             'status': {
@@ -1276,7 +1280,7 @@ class RunState(State):
         new_state[target_name] = {
             **self.get_default_target_state_fields(code, backup_type, backup_format, msg),
             'last_success_backup_timestamp': {
-                'unix': int(last_success_backup_date.timestamp() * 1000) if last_success_backup_date else None,
+                'milliseconds': int(last_success_backup_date.timestamp() * 1000) if last_success_backup_date else None,
                 'display': last_success_backup_date.strftime("%Y-%m-%d %H:%M:%S") if last_success_backup_date else None
             },
             'backup_size': {
@@ -1356,7 +1360,7 @@ class PushMetricsState(State):
         new_state = self.state
         new_state[metric_server_type] = {
             'timestamp': {
-                'unix': int(now.timestamp()),
+                'milliseconds': int(now.timestamp() * 1000),
                 'display': now.strftime("%Y-%m-%d %H:%M:%S")
             },
             'status': {
@@ -1530,16 +1534,16 @@ if __name__ == "__main__":
         os.makedirs(path, exist_ok=True)       
     
     if args.action == Action.CLEANUP.value:
-        state = CleanupState(f"{common_conf['path']['state']}/cleanup-state.yaml")
+        state = CleanupState(f"{common_conf['path']['state']}/{StateFiles.CLEANUP.value}")
         nagios_service = common_conf['nagios']['cleanup_service']
     elif args.action == Action.VALIDATE.value:
-        state = ValidateState(f"{common_conf['path']['state']}/validation-state.yaml")
+        state = ValidateState(f"{common_conf['path']['state']}/{StateFiles.VALIDATION.value}")
         nagios_service = common_conf['nagios']['validation_service']
     elif args.action == Action.RUN.value:
-        state = RunState(f"{common_conf['path']['state']}/run-state.yaml")
+        state = RunState(f"{common_conf['path']['state']}/{StateFiles.RUN.value}")
         nagios_service = common_conf['nagios']['run_service']
     elif args.action == Action.PUSH_METRICS.value:
-        state = PushMetricsState(f"{common_conf['path']['state']}/push-metrics-state.yaml")
+        state = PushMetricsState(f"{common_conf['path']['state']}/{StateFiles.PUSH_METRICS.value}")
         nagios_service = common_conf['nagios']['push_metrics_service']
     
     nagios = NagiosServer(common_conf['nagios']['host'], common_conf['nagios']['port'], common_conf['nagios']['host_service'], nagios_service)
