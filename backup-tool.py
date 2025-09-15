@@ -1659,8 +1659,15 @@ if __name__ == "__main__":
             except catch_exception_class as e:
                 code = e.code if hasattr(e, 'code') else Nagios.CRITICAL
                 if args.action == Action.RUN.value:
-                    latest_backup = target.get_latest_backup()
-                    state.update(target.name, int(code), target.type, target.format, str(e), latest_backup.date if latest_backup else None)
+                    latest_backup = target.get_latest_backup() if isinstance(target, Target) else None
+                    state.update(
+                        str(target), 
+                        int(code), 
+                        target_conf.get('type'), 
+                        target_conf.get('format') or conf.get('default', {}).get('format'), 
+                        str(e), 
+                        latest_backup.date if latest_backup else None
+                    )
                 else:
                     state.update(target.name, int(code), target.type, target.format, str(e))
 
