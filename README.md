@@ -4,7 +4,7 @@
 
 | Parameter | Description |
 |:----------|:------------|
-| `nagios.host` |  |
+| `nagios.host` | :heavy_check_mark: |
 | `nagios.port` |  |
 | `nagios.host_service` |  |
 | `nagios.run_service` |  |
