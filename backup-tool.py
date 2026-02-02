@@ -837,7 +837,7 @@ class Target():
             backup.remove()
             raise TargetError(error)
         
-        if self.format == Format.PACKAGE.value or self.format == Format.ENCRYPTED_PACKAGE.value or self.format == Format.COMPRESSED_PACKAGE.value:
+        if self.format in [Format.PACKAGE.value, Format.ENCRYPTED_PACKAGE.value, Format.COMPRESSED_PACKAGE.value]:
             pack_start_time = datetime.now()
             old_cwd = os.getcwd()
             os.chdir(backup.directory)
@@ -881,6 +881,8 @@ class Target():
         except PermissionError as e:
             backup.remove()
             raise TargetError(f'Setting backup privileges failed: {e}')
+        
+        os.symlink(backup.path, f"{backup.directory}/latest")
         log.info(f"Backup finished successfully")
         self.backup = backup
         
@@ -1588,71 +1590,71 @@ if __name__ == "__main__":
                 if args.action == Action.RUN.value:
                     backup = target.create_backup()
                     state.update(
-                        target.name, 
-                        int(Nagios.OK), 
-                        target.type, 
-                        target.format, 
-                        f'({get_display_size(backup.size)}) {backup.file}', 
-                        backup.date,
-                        backup.size, 
-                        backup.copy_duration_sec, 
-                        backup.pack_duration_sec, 
-                        backup.copy_bytes_per_sec, 
-                        backup.pack_bytes_per_sec,
+                        target_name=target.name, 
+                        code=int(Nagios.OK), 
+                        backup_type=target.type, 
+                        backup_format=target.format, 
+                        msg=f'({get_display_size(backup.size)}) {backup.file}', 
+                        last_success_backup_date=backup.date,
+                        size=backup.size, 
+                        copy_duration_sec=backup.copy_duration_sec, 
+                        pack_duration_sec=backup.pack_duration_sec, 
+                        copy_bytes_per_sec=backup.copy_bytes_per_sec, 
+                        pack_bytes_per_sec=backup.pack_bytes_per_sec,
                     )
                 elif args.action == Action.CLEANUP.value:                
                     if target.get_backups_num() == 0:
                         state.update(
-                            target.name, 
-                            int(Nagios.WARNING), 
-                            target.type, 
-                            target.format, 
-                            'Not found any backup', 
-                            0,
-                            0, 
-                            0,
-                            0,
-                            target.max_size, 
-                            target.max_num
+                            target_name=target.name, 
+                            code=int(Nagios.WARNING), 
+                            backup_type=target.type, 
+                            backup_format=target.format, 
+                            msg='Not found any backup', 
+                            recovered_data=0,
+                            removed_backups=0, 
+                            total_size=0,
+                            total_num=0,
+                            max_size=target.max_size, 
+                            max_num=target.max_num
                         )
                     else:
                         msg, recovered_bytes, removed_backups, total_size, total_num = target.cleanup()
                         state.update(
-                            target.name, 
-                            int(Nagios.OK), 
-                            target.type,
-                            target.format,
-                            msg, 
-                            recovered_bytes, 
-                            removed_backups, 
-                            total_size, 
-                            total_num, 
-                            target.max_size, 
-                            target.max_num
+                            target_name=target.name, 
+                            code=int(Nagios.OK), 
+                            backup_type=target.type,
+                            backup_format=target.format,
+                            msg=msg, 
+                            recovered_data=recovered_bytes, 
+                            removed_backups=removed_backups, 
+                            total_size=total_size, 
+                            total_num=total_num, 
+                            max_size=target.max_size, 
+                            max_num=target.max_num
                         )
                 elif args.action == Action.VALIDATE.value:
                     invalid_backups, avg_size, recent_invalid_streak = target.validate()
                     if len(invalid_backups) > 0:
                         state.update(
-                            target.name, 
-                            int(Nagios.WARNING), 
-                            target.type, 
-                            target.format,
-                            None,
-                            invalid_backups, 
-                            avg_size, 
-                            recent_invalid_streak
+                            target_name=target.name, 
+                            code=int(Nagios.WARNING), 
+                            backup_type=target.type, 
+                            backup_format=target.format,
+                            msg=None,
+                            invalid_backups=invalid_backups, 
+                            avg_size=avg_size, 
+                            recent_invalid_streak=recent_invalid_streak
                         )
                     else:
                         state.update(
-                            target.name, 
-                            int(Nagios.OK), 
-                            target.type,
-                            target.format,
-                            None,
-                            [], 
-                            avg_size, 
-                            recent_invalid_streak
+                            target_name=target.name, 
+                            code=int(Nagios.OK), 
+                            backup_type=target.type,
+                            backup_format=target.format,
+                            msg=None,
+                            invalid_backups=[], 
+                            avg_size=avg_size, 
+                            recent_invalid_streak=recent_invalid_streak
                         )
                 else:
                     raise TargetError(f"Action '{args.action}' is not valid option. Valid options are: {Defaults.list(Action)}")
@@ -1661,12 +1663,12 @@ if __name__ == "__main__":
                 if args.action == Action.RUN.value:
                     latest_backup = target.get_latest_backup() if isinstance(target, Target) else None
                     state.update(
-                        str(target), 
-                        int(code), 
-                        target_conf.get('type'), 
-                        target_conf.get('format') or conf.get('default', {}).get('format'), 
-                        str(e), 
-                        latest_backup.date if latest_backup else None
+                        target_name=str(target), 
+                        code=int(code), 
+                        backup_type=target_conf.get('type'), 
+                        backup_format=target_conf.get('format') or conf.get('default', {}).get('format'), 
+                        msg=str(e), 
+                        last_success_backup_date=latest_backup.date if latest_backup else None
                     )
                 else:
                     state.update(target.name, int(code), target.type, target.format, str(e))
