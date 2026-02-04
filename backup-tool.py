@@ -1669,8 +1669,8 @@ if __name__ == "__main__":
                     state.update(
                         target_name=str(target), 
                         code=int(code), 
-                        backup_type=target_conf.get('type'), 
-                        backup_format=target_conf.get('format') or conf.get('default', {}).get('format'), 
+                        backup_type=target_conf.get('type') if target_conf else None, 
+                        backup_format=target_conf.get('format') if target_conf else conf.get('default', {}).get('format'), 
                         msg=str(e), 
                         last_success_backup_date=latest_backup.date if latest_backup else None
                     )
