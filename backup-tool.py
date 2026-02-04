@@ -882,9 +882,13 @@ class Target():
             backup.remove()
             raise TargetError(f'Setting backup privileges failed: {e}')
         
-        os.symlink(backup.path, f"{backup.directory}/latest")
         log.info(f"Backup finished successfully")
         self.backup = backup
+        latest_path = f"{backup.directory}/latest"
+        
+        if os.path.islink(latest_path) or os.path.exists(latest_path):
+            os.unlink(latest_path)
+        os.symlink(backup.path, latest_path)
         
         if backup.pack_duration_sec is not None:
             backup.pack_bytes_per_sec = round(backup.size / backup.pack_duration_sec)
