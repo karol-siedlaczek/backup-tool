@@ -1594,7 +1594,12 @@ if __name__ == "__main__":
                 log.debug(f"Excluded target '{excluded_target}' not present in target list, ignoring")
 
         if not args.targets:
-            log.warning("No targets left to process after applying --exclude")
+            code = Nagios.WARNING
+            msg = f"{code.}: No targets left to process after applying --exclude"
+            print(msg)
+            log.warning(msg)
+            nagios.send_report_to_nagios(code, msg)
+            sys.exit(int(code))
 
         for target in args.targets:
             try:                      
