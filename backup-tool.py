@@ -378,12 +378,16 @@ class NagiosServer():
         self.service = service
     
     def send_report_to_nagios(self, code: int, msg: str) -> None:
-        msg = f'{self.host_service}\t{self.service}\t{code}\t{msg}'
-        cmd = f"{self.echo_bin} -e '{msg}' | {self.nsca_bin} -H {self.host} -p {self.port}"
-        
+        # Pass the packet to send_nsca via stdin instead of building an
+        # 'echo ... | send_nsca' shell pipeline. The message can contain
+        # arbitrary characters (quotes, parentheses, etc.) that would break
+        # shell parsing, so feeding it straight to stdin avoids any escaping.
+        packet = f'{self.host_service}\t{self.service}\t{code}\t{msg}\n'
+        cmd = f"{self.nsca_bin} -H {self.host} -p {self.port}"
+
         try:
-            result = run_cmd(cmd)
-            log.debug(f"Nsca packet '{msg}' sent to {self.host}:{self.port}, output: {result}") 
+            result = run_cmd(cmd, stdin_input=packet)
+            log.debug(f"Nsca packet '{repr(packet.strip())}' sent to {self.host}:{self.port}, output: {result}")
         except subprocess.CalledProcessError as e:
             raise ConnectionError(f"Sending nsca packet to {self.host}:{self.port} failed {e}: {e.stderr}")
     
@@ -1490,17 +1494,18 @@ def get_logger(log_file: str, verbose_level: int) -> None:
     logging.setLogRecordFactory(record_factory)
     return logging.getLogger('backup-tool')
 
-def run_cmd(cmd: str, check: bool=True) -> str:
+def run_cmd(cmd: str, check: bool=True, stdin_input: str=None) -> str:
     # TODO - Add here proper stats for elapsed seconds
     # start = time.perf_counter()
     process = subprocess.run(
-        cmd, 
-        shell=True, 
-        stdin=subprocess.DEVNULL, 
-        stderr=subprocess.PIPE, 
-        stdout=subprocess.PIPE, 
-        check=check, 
-        text=True, 
+        cmd,
+        shell=True,
+        input=stdin_input,
+        stdin=subprocess.DEVNULL if stdin_input is None else None,
+        stderr=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        check=check,
+        text=True,
         executable="/bin/bash"
     )
     #end = time.perf_counter()
