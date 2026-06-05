@@ -1595,7 +1595,7 @@ if __name__ == "__main__":
 
         if not args.targets:
             code = Nagios.WARNING
-            msg = f"{Nagios.get_status_by_code(code)}: No targets left to process after applying --exclude"
+            msg = f"{Nagios.get_status_by_code(code)}: No targets left to process after applying -x/--exclude"
             print(msg)
             log.warning(msg)
             nagios.send_report_to_nagios(code, msg)
