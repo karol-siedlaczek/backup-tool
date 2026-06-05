@@ -206,6 +206,7 @@ Common options:
 | `-v`, `-vv`, `-vvv` | all | Verbosity (`-v` = INFO, `-vv` = DEBUG, `-vvv` = DEBUG + tracebacks) |
 | `--no-report` | all | Skip the NSCA report at the end of the run |
 | `-t`, `--targets <name...>` | `run`, `cleanup`, `validate` | Target list or `all` |
+| `-x`, `--exclude <name...>` | `run`, `cleanup`, `validate` | Targets to exclude from `--targets` (e.g. `-t all -x desktop`) |
 | `--force` | `cleanup` | Allow deleting the last remaining backup |
 | `--skip-frequency` | `run` | Ignore the `frequency` gate on push targets |
 | `-m`, `--mode {full,inc}` | `run` | Reserved (only `full` is implemented today) |
@@ -215,6 +216,7 @@ Examples:
 
 ```bash
 ./backup-tool.py run -c /etc/backup-tool/backup-tool.yaml -t mgmt remote-server
+./backup-tool.py run -c /etc/backup-tool/backup-tool.yaml -t all -x desktop
 ./backup-tool.py cleanup -c /etc/backup-tool/backup-tool.yaml -t all --force
 ./backup-tool.py validate -c /etc/backup-tool/backup-tool.yaml -t all
 ./backup-tool.py push-metrics -c /etc/backup-tool/backup-tool.yaml

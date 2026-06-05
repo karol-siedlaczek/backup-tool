@@ -1413,6 +1413,11 @@ def parse_args():
             nargs='+',
             help='Target list defined in config file under "targets" markup'
         )
+        parser.add_argument('-x', '--exclude',
+            nargs='+',
+            default=[],
+            help='Exclude these targets from the list given in --targets (e.g. -t all -x desktop)'
+        )
             
     if action == Action.CLEANUP.value:
         parser.add_argument('--force',
@@ -1580,7 +1585,17 @@ if __name__ == "__main__":
     else:     
         if 'all' in args.targets:
             args.targets = list(conf.get('targets'))
-    
+
+        for excluded_target in args.exclude:
+            if excluded_target in args.targets:
+                args.targets.remove(excluded_target)
+                log.debug(f"Target '{excluded_target}' excluded from this iteration")
+            else:
+                log.debug(f"Excluded target '{excluded_target}' not present in target list, ignoring")
+
+        if not args.targets:
+            log.warning("No targets left to process after applying --exclude")
+
         for target in args.targets:
             try:                      
                 target_conf = conf['targets'].get(target)
