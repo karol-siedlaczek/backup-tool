@@ -650,6 +650,7 @@ class Target():
         self.owner = conf.get('owner') or default_conf.get('owner')
         self.permissions = conf.get('permissions') or default_conf.get('permissions')
         self.encryption_key = conf.get('encryption_key') or default_conf.get('encryption_key')
+        self.failures_threshold = conf.get('failures_threshold') or default_conf.get('failures_threshold')
     
     @property
     def type(self) -> str:
@@ -690,7 +691,11 @@ class Target():
     @property
     def encryption_key(self) -> str:
         return self._encryption_key
-    
+
+    @property
+    def failures_threshold(self) -> int:
+        return self._failures_threshold
+
     @type.setter
     def type(self, value) -> None:
         Validator.validate_required_param('type', value)
@@ -765,7 +770,16 @@ class Target():
             self._encryption_key = value
         else:
             self._encryption_key = None
-        
+
+    @failures_threshold.setter
+    def failures_threshold(self, value) -> None:  # How many consecutive failures are needed before target is reported as failed to nagios
+        if value:
+            Validator.validate_type('failures_threshold', int, value)
+            Validator.validate_min_value('failures_threshold', 1, value)
+            self._failures_threshold = value
+        else:
+            self._failures_threshold = 1
+
     def get_backups_size(self) -> int:
         return get_path_size(self.dest)
         
@@ -1234,11 +1248,31 @@ class State():
         
         for target_state in self.state.values():
             status = target_state.get('status')
-            
+
+            if (target_state.get('failures') or {}).get('suppressed'):  # Failure streak too short to be reported as failure
+                continue
+
             if int(status['code']) > int(most_failure_status['code']):
                 most_failure_status = status
         return most_failure_status
-    
+
+    def get_failures_state(self, target_name: str, code: int, failures_threshold: int = 1, count_failure: bool = True) -> dict:
+        prev_failures = self.state.get(target_name) or {}
+        prev_count = (prev_failures.get('failures') or {}).get('count') or 0
+
+        if not count_failure:  # Neutral update (e.g. skipped target), streak is neither increased nor reset
+            count = prev_count
+        elif int(code) > int(Nagios.OK):
+            count = prev_count + 1
+        else:
+            count = 0
+
+        return {
+            'count': count,
+            'threshold': failures_threshold,
+            'suppressed': int(code) > int(Nagios.OK) and 0 < count < failures_threshold
+        }
+
     def get_default_target_state_fields(self, code: int, backup_type: str, backup_format: str, msg: str) -> dict:
         now = datetime.now()
         return {
@@ -1264,8 +1298,13 @@ class State():
                 msg = target_state.get('msg').strip().replace("\r\n", " ").replace("\n", " ")
                 timestamp = target_state.get('timestamp', {}).get('display', None)
                 status_display = status.get('display', 'UNDEFINED')
-                
-                summary += f"{status_display}: [{target}] {msg} ({timestamp})</br>"
+                failures = target_state.get('failures') or {}
+
+                if failures.get('suppressed'):  # Reported as OK until failures streak reaches 'failures_threshold'
+                    summary += f"{Nagios.OK.name}: [{target}] {msg} ({status_display} " + \
+                        f"{failures.get('count')}/{failures.get('threshold')}, suppressed) ({timestamp})</br>"
+                else:
+                    summary += f"{status_display}: [{target}] {msg} ({timestamp})</br>"
         
         if summary == '':
             if args.action == Action.RUN.value:
@@ -1285,10 +1324,12 @@ class RunState(State):
     def __init__(self, state_file) -> None:
         super().__init__(state_file)
     
-    def update(self, target_name: str, code: int, backup_type: str, backup_format: str, msg: str, last_success_backup_date: datetime = None, size: int=None, copy_duration_sec: int=None, pack_duration_sec: int=None, copy_bytes_per_sec: int=None, pack_bytes_per_sec: int=None) -> None:
+    def update(self, target_name: str, code: int, backup_type: str, backup_format: str, msg: str, last_success_backup_date: datetime = None, size: int=None, copy_duration_sec: int=None, pack_duration_sec: int=None, copy_bytes_per_sec: int=None, pack_bytes_per_sec: int=None, failures_threshold: int=1, count_failure: bool=True) -> None:
         new_state = self.state
+        failures = self.get_failures_state(target_name, code, failures_threshold, count_failure)
         new_state[target_name] = {
             **self.get_default_target_state_fields(code, backup_type, backup_format, msg),
+            'failures': failures,
             'last_success_backup_timestamp': {
                 'milliseconds': int(last_success_backup_date.timestamp() * 1000) if last_success_backup_date else None,
                 'display': last_success_backup_date.strftime("%Y-%m-%d %H:%M:%S") if last_success_backup_date else None
@@ -1308,6 +1349,8 @@ class RunState(State):
                 }
             },
         }
+        if failures['suppressed']:
+            log.warning(f"Report to nagios suppressed, this is {failures['count']}/{failures['threshold']} consecutive failure of this target")
         super().update(target_name, new_state, code, msg)
 
 
@@ -1628,8 +1671,9 @@ if __name__ == "__main__":
                         size=backup.size, 
                         copy_duration_sec=backup.copy_duration_sec, 
                         pack_duration_sec=backup.pack_duration_sec, 
-                        copy_bytes_per_sec=backup.copy_bytes_per_sec, 
+                        copy_bytes_per_sec=backup.copy_bytes_per_sec,
                         pack_bytes_per_sec=backup.pack_bytes_per_sec,
+                        failures_threshold=target.failures_threshold,
                     )
                 elif args.action == Action.CLEANUP.value:                
                     if target.get_backups_num() == 0:
@@ -1692,12 +1736,14 @@ if __name__ == "__main__":
                 if args.action == Action.RUN.value:
                     latest_backup = target.get_latest_backup() if isinstance(target, Target) else None
                     state.update(
-                        target_name=str(target), 
-                        code=int(code), 
-                        backup_type=target_conf.get('type') if target_conf else None, 
-                        backup_format=target_conf.get('format') if target_conf else conf.get('default', {}).get('format'), 
-                        msg=str(e), 
-                        last_success_backup_date=latest_backup.date if latest_backup else None
+                        target_name=str(target),
+                        code=int(code),
+                        backup_type=target_conf.get('type') if target_conf else None,
+                        backup_format=target_conf.get('format') if target_conf else conf.get('default', {}).get('format'),
+                        msg=str(e),
+                        last_success_backup_date=latest_backup.date if latest_backup else None,
+                        failures_threshold=target.failures_threshold if isinstance(target, Target) else 1,
+                        count_failure=not isinstance(e, TargetSkipException)  # Skipped target neither increases nor resets failures streak
                     )
                 else:
                     state.update(target.name, int(code), target.type, target.format, str(e))

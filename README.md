@@ -11,6 +11,7 @@ Automated backup orchestration for multiple targets, with Nagios reporting and I
 - Validation pass that flags backups whose size deviates from the running average
 - Per-target `pre_hooks` (e.g. dump a database, stop a service)
 - Reporting to Nagios via NSCA and metric push to InfluxDB or VictoriaMetrics
+- Per-target `failures_threshold` so a single transient failure does not raise an alert
 - YAML configuration with inheritable defaults and per-target overrides
 
 ## Requirements
@@ -95,6 +96,7 @@ Any option listed under `default` is inherited by every target unless the target
 | `timeout` | rsync connection timeout in seconds |
 | `pre_hooks` | List of shell commands to run before the backup is created |
 | `exclude` | List of rsync `--exclude` patterns (pull targets) |
+| `failures_threshold` | How many consecutive failed `run` attempts are needed before the target is reported as failed to Nagios (integer ≥ 1, default `1` — report immediately). See [Failure suppression](#failure-suppression) |
 
 ### `targets`
 
@@ -176,6 +178,7 @@ targets:
       - Downloads
     max_size: 50GB
     timeout: 120
+    failures_threshold: 3
 
   database-dumps:
     type: push
@@ -247,6 +250,30 @@ After each action the tool computes the worst per-target status and sends a pass
 | `push-metrics` | `common.nagios.push_metrics_service` |
 
 Status codes mirror Nagios conventions: `OK=0`, `WARNING=1`, `CRITICAL=2`, `UNKNOWN=3`. Use `--no-report` to suppress the report (useful for ad-hoc runs).
+
+### Failure suppression
+
+A single failed `run` is often transient — the source host was busy, the network blipped, the next day it works again. Set `failures_threshold` on a target (or in `default`) to alert only after N consecutive failures:
+
+```yaml
+targets:
+  remote-server:
+    type: pull
+    failures_threshold: 3   # alert on the 3rd failure in a row
+    sources:
+      - rsync://backup_user@remote.example.com/etc
+```
+
+How it behaves:
+
+- The streak is tracked per target in `run-state.yaml` under `failures: {count, threshold, suppressed}`.
+- While `count < threshold` the target does not raise the Nagios service status. It still shows up in the service output as `OK: [target] <error> (CRITICAL 2/3, suppressed)`, so the failure is visible without paging anyone.
+- Once `count` reaches `threshold`, the real status (`WARNING` / `CRITICAL`) is reported as usual.
+- A successful backup resets `count` to `0`. A skipped target (a push target whose `frequency` has not elapsed) leaves the streak untouched.
+- The status stored in state — and therefore every metric pushed to InfluxDB / VictoriaMetrics — is always the real one, never the suppressed one. Suppression affects the Nagios report only.
+- Log output is unaffected: a suppressed failure is still logged as `ERROR` / `WARNING`, with an extra line stating which attempt in the streak it was.
+
+Applies to `run` only. `cleanup` and `validate` always report immediately.
 
 ### Metrics (InfluxDB / VictoriaMetrics)
 

@@ -65,14 +65,14 @@ common:
   metric_server: { provider, host, port, ... }  # optional, provider ∈ {influx, victoria-metrics}
 
 default:   # inherited by every target unless overridden
-  format, owner, permissions, max_size | max_num, encryption_key, password_file, timeout, pre_hooks, exclude
+  format, owner, permissions, max_size | max_num, encryption_key, password_file, timeout, pre_hooks, exclude, failures_threshold
 
 targets:
   <name>:
     type: pull|push
     # pull:  sources (list), exclude, timeout, password_file, rsync_port (873)
     # push:  frequency (e.g. 1h/1d/2w/3m), work_dir derived from common.path.work
-    # both:  dest (default: target name), format, owner, permissions, max_size | max_num, pre_hooks
+    # both:  dest (default: target name), format, owner, permissions, max_size | max_num, pre_hooks, failures_threshold
 ```
 
 `max_size` and `max_num` are mutually exclusive (`:635-643`); at least one is mandatory per target.
@@ -86,6 +86,7 @@ targets:
 - Push waits for files in `common.path.work/<target>/` and moves them to `dest/backup-...` only if `frequency` has elapsed (`:1146`)
 - Formats: `raw` (dir), `package` (tar), `compressed-package` (tar+pigz), `encrypted-package` (tar+pigz+gpg2 via `scripts/pack_and_encrypt.sh`)
 - `pre_hooks` run before backup creation (e.g. stopping a DB)
+- `failures_threshold` (`run` only, default 1) suppresses the Nagios report until N consecutive failures. The streak lives in `run-state.yaml` under `failures: {count, threshold, suppressed}`, written by `RunState.update` via `State.get_failures_state`. `status` in state stays the **real** one (metrics must not lie); only `State.get_most_failure_status` and `get_summary` honour `suppressed`. Success resets the streak, `TargetSkipException` leaves it untouched (`count_failure=False`)
 
 ## Conventions
 
