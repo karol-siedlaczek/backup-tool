@@ -23,6 +23,8 @@ from yaml.scanner import ScannerError
 import subprocess
 import logging
 
+RSYNC_VANISHED_FILES_CODE = 24  # rsync exit code: some files vanished in source before they could be transferred
+
 class Defaults(Enum):
     @staticmethod
     def list(enum_class=None) -> list:
@@ -1102,14 +1104,23 @@ class PullTarget(Target):
         log.info(f"Pulling target files to '{new_backup_path}' path...")
         log.debug(f"rsync cmd: {cmd}")
         
+        copy_start_time = datetime.now()
+        
         try:
-            copy_start_time = datetime.now()
-            result = run_cmd(cmd)  # TODO - Add reaction to 24 code (some file vanished) log.warning(f"Some files vanished in source during syncing: [{result.code}] {result.output}")
+            result = run_cmd(cmd)
             copy_duration_sec = (datetime.now() - copy_start_time).seconds
         except subprocess.CalledProcessError as e:
-            remove_file_or_dir(new_backup_path)
-            log.error(f"Pulling target files failed: [{e.returncode}] {e}: {e.stderr}")
-            raise TargetError(f"Pulling target files failed: {e.stderr}")
+            if e.returncode != RSYNC_VANISHED_FILES_CODE:
+                remove_file_or_dir(new_backup_path)
+                log.error(f"Pulling target files failed: [{e.returncode}] {e}: {e.stderr}")
+                raise TargetError(f"Pulling target files failed: {e.stderr}")
+            
+            copy_duration_sec = (datetime.now() - copy_start_time).seconds
+            result = e.stdout or e.stderr
+            vanished_files = re.findall(r'^file has vanished: "(.*)"$', e.stderr or '', re.MULTILINE)
+            log.warning(f"Some files vanished in source during syncing, backup is still valid: [{e.returncode}] " + \
+                f"{len(vanished_files)} files vanished, first ones: {', '.join(vanished_files[:3])}")
+            log.debug(f"Vanished files: {e.stderr}")
         
         if self.stats_file:
             with open(self.stats_file, 'w') as f:
